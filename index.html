@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LIOR MAMON — Listening to a Living Planet</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+<script src="https://unpkg.com/framer-motion@11.11.17/dist/framer-motion.js"></script>
+<script>window.Motion = window.Motion || window.FramerMotion;</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Barlow:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script>
+  tailwind.config = { theme: { extend: {
+    fontFamily: { heading: ["'Instrument Serif'","serif"], body: ["'Barlow'","sans-serif"] },
+    borderRadius: { DEFAULT: "9999px" },
+  } } }
+</script>
+<style>
+  html,body{background:#000;margin:0;overflow:hidden}
+  .liquid-glass{
+    background:rgba(255,255,255,0.01); background-blend-mode:luminosity;
+    backdrop-filter:blur(4px); -webkit-backdrop-filter:blur(4px);
+    border:none; box-shadow:inset 0 1px 1px rgba(255,255,255,0.1);
+    position:relative; overflow:hidden;
+  }
+  .liquid-glass::before{
+    content:""; position:absolute; inset:0; border-radius:inherit; padding:1.4px;
+    background:linear-gradient(180deg,rgba(255,255,255,0.45) 0%,rgba(255,255,255,0.15) 20%,
+      rgba(255,255,255,0) 40%,rgba(255,255,255,0) 60%,rgba(255,255,255,0.15) 80%,rgba(255,255,255,0.45) 100%);
+    -webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
+    -webkit-mask-composite:xor; mask-composite:exclude; pointer-events:none;
+  }
+  .heat-ramp{background:linear-gradient(90deg,#0b1a4a,#2b2a80 14%,#5c2a8a 28%,#8f2d78 42%,#bd3355 55%,#e0552e 68%,#f5842a 80%,#fbb63f 90%,#fce98a)}
+  @keyframes quiver{0%{transform:rotate(0deg) scale(1)}50%{transform:rotate(1.6deg) scale(1.015)}100%{transform:rotate(0deg) scale(1)}}
+  .moire{animation:quiver 9s ease-in-out infinite; transform-origin:center}
+  .moire2{animation:quiver 13s ease-in-out infinite reverse}
+  .hwrap{scroll-snap-type:x mandatory; scrollbar-width:none}
+  .hwrap::-webkit-scrollbar{display:none}
+  .panel{scroll-snap-align:start; scroll-snap-type:y mandatory; scrollbar-width:none}
+  .panel::-webkit-scrollbar{display:none}
+  .vslide{scroll-snap-align:start}
+  @keyframes nudge{0%,100%{transform:translateX(0)}50%{transform:translateX(6px)}}
+  .nudge{animation:nudge 2.2s ease-in-out infinite}
+  @keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(5px)}}
+  .bob{animation:bob 1.6s ease-in-out infinite}
+</style>
+</head>
+<body class="bg-black">
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React
+const motion = window.Motion.motion
+
+const _err = console.error
+console.error = (...a) => { if (typeof a[0]==='string' && a[0].includes('unique "key"')) return; _err(...a) }
+
+const rise = (delay=0) => ({
+  initial:{filter:"blur(8px)",opacity:0,y:18},
+  whileInView:{filter:"blur(0px)",opacity:1,y:0},
+  viewport:{once:true, amount:0.4},
+  transition:{duration:0.8,ease:"easeOut",delay}
+})
+
+function Row({label, children}){
+  return (
+    <div className="grid mt-3 gap-y-1.5" style={{gridTemplateColumns:"110px 1fr", columnGap:"14px", alignItems:"baseline"}}>
+      <span className="text-[10px] tracking-[0.3em] text-white/45 font-body">{label}</span>
+      <div className="flex flex-wrap items-center gap-1.5">{children}</div>
+    </div>
+  )
+}
+
+function System({steps, tone="rgba(255,255,255,.55)"}){
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="mt-4">
+      <button onClick={()=>setOpen(o=>!o)} className="text-[10px] tracking-[0.3em] font-body" style={{color:tone}}>
+        SYSTEM {open ? "▾" : "▸"}
+      </button>
+      {open && (
+        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1.5">
+          {steps.map((s,i)=>(
+            <React.Fragment key={i}>
+              <span className="text-[11px] font-body text-white/70 liquid-glass rounded-full px-2.5 py-1">{s}</span>
+              {i<steps.length-1 && <span className="text-white/30 text-xs">→</span>}
+            </React.Fragment>))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// looping reel background for an intro screen
+function Reel({name, dim}){
+  const ref = useRef(null)
+  useEffect(()=>{
+    const v = ref.current
+    const ext = v.canPlayType('video/webm; codecs="vp9"') ? '.webm' : '.mp4'
+    v.src = 'reels/' + name + ext + '?v=mrrtr00y'
+    v.play().catch(()=>{})
+  },[])
+  return (
+    <div className="absolute inset-0 z-0 overflow-hidden bg-black">
+      <video ref={ref} autoPlay muted playsInline loop preload="auto"
+        className="absolute inset-0 w-full h-full object-cover"/>
+      <div className="absolute inset-0" style={{background:dim}}/>
+    </div>
+  )
+}
+
+// down-cue button: scrolls its panel to the live instrument
+function Enter({children, cls=""}){
+  const onClick = e => {
+    const panel = e.target.closest('.panel')
+    panel.scrollTo({ top: panel.clientHeight, behavior: 'smooth' })
+  }
+  return (
+    <button onClick={onClick}
+      className={"mt-8 rounded-full px-5 py-2.5 text-sm font-medium flex items-center gap-2 w-max liquid-glass text-white "+cls}>
+      {children} <span className="inline-block">↓</span></button>
+  )
+}
+
+// bigger clickable scroll cue with throbbing arrow, centered like the nav (Lior 2026-07-18)
+function ScrollCue(){
+  const onClick = e => {
+    const panel = e.target.closest('.panel')
+    panel.scrollTo({ top: panel.clientHeight, behavior: 'smooth' })
+  }
+  return (
+    <div className="absolute bottom-6 left-0 right-0 flex justify-center">
+      <button onClick={onClick}
+        className="liquid-glass rounded-full pl-5 pr-4 py-2.5 flex items-center gap-2.5 text-white/75 hover:text-white font-body">
+        <span className="text-[11px] tracking-[0.3em]" style={{marginRight:"-0.3em"}}>SCROLL</span>
+        <span className="bob text-lg leading-none">↓</span>
+      </button>
+    </div>
+  )
+}
+
+// ══════════ intros (each keeps its own identity) ══════════
+function ShieldIntro(){
+  return (
+    <div className="vslide relative w-screen h-screen overflow-hidden bg-black">
+      <Reel name="shield" dim="linear-gradient(90deg,rgba(0,2,10,.92) 0%,rgba(0,2,10,.5) 45%,rgba(0,2,10,.12) 100%)"/>
+      <div className="relative z-10 h-full flex flex-col justify-center px-6 md:px-16 lg:px-24 max-w-2xl">
+        <motion.div {...rise(0)} className="font-body text-xs tracking-[0.4em] text-sky-300/80">INTO A SOLAR STORM</motion.div>
+        <motion.h2 {...rise(0.1)} className="mt-4 font-heading italic text-white text-6xl md:text-8xl tracking-[-3px] leading-[0.85]">
+          Space<br/>Weather</motion.h2>
+        <motion.p {...rise(0.2)} className="mt-7 text-base md:text-lg text-white/90 font-body font-light leading-relaxed">
+          Solar wind, a constant breath of charged particles blowing from the Sun, streams past Earth
+          at a million miles an hour. Earth's magnetic field deflects it from entering the atmosphere,
+          like an invisible protective shield. However during solar storms, the Sun erupts and shoots
+          huge clouds of hot charged gas into space. When one of them hits Earth, the shield is
+          squeezed and briefly broken through, and for a few hours the solar wind can be felt and seen
+          in all its force, Power grids surge, satellites go blind, compasses wander, and in its
+          beauty, the poles light with aurora. This is space weather.
+        </motion.p>
+        <motion.div {...rise(0.4)}><Enter cls="border border-sky-300/40">ENTER THE STORM</Enter></motion.div>
+      </div>
+      <ScrollCue/>
+    </div>
+  )
+}
+
+// night-sky powder behind the Explained strip (Lior 2026-07-19, ref: Milky Way photo) —
+// thousands of faint grains painted once to a canvas, edge-weighted (middle stays near-clean
+// for the text), with a whisper of aurora wash. Kill the wash by deleting the two gradient fills.
+const STARSKY = (() => {
+  const cv = document.createElement('canvas'); cv.width = 1600; cv.height = 700
+  const g = cv.getContext('2d')
+  for (let i = 0; i < 5200; i++) {
+    const x = Math.random()*1600, y = Math.random()*700
+    const edge = Math.min(1, Math.pow(Math.hypot(x-800, y-350)/870, 1.6) + 0.35)
+    const r = Math.random(), size = r < 0.85 ? 0.8 : r < 0.98 ? 1.2 : 1.8
+    g.fillStyle = `rgba(${185+Math.random()*40|0},${195+Math.random()*35|0},${215+Math.random()*40|0},${((0.07+Math.random()*0.45)*edge).toFixed(3)})`
+    g.beginPath(); g.arc(x, y, size, 0, 7); g.fill()
+  }
+  const w1 = g.createLinearGradient(200, 700, 1000, 0)
+  w1.addColorStop(0, 'rgba(60,242,164,0.055)'); w1.addColorStop(0.55, 'rgba(60,242,164,0.015)'); w1.addColorStop(1, 'rgba(107,77,224,0.04)')
+  g.fillStyle = w1; g.fillRect(0, 0, 1600, 700)
+  return cv.toDataURL('image/png')
+})()
+function StarBg(){
+  return <div className="absolute inset-0 pointer-events-none" aria-hidden
+    style={{backgroundImage:`url(${STARSKY})`, backgroundSize:"cover", backgroundPosition:"center"}}/>
+}
+
+// expandable "Explained" strip under the demo — collapsed: title + one-line snippet;
+// expanded: full text (one column, long rows) and the demo shrinks to make room (Lior 2026-07-18)
+function Explain({title, snippet, children, wash}){
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="relative flex-none bg-black border-t border-white/10 px-6 md:px-16 lg:px-24 py-4"
+      style={{maxHeight: open ? "52vh" : "72px", overflowY: open ? "auto" : "hidden", transition:"max-height .5s ease"}}>
+      <StarBg/>
+      {wash && <div className="absolute inset-0 pointer-events-none" aria-hidden style={{background:wash}}/>}
+      {/* expanded header stays inside the text column so it clears the fixed side arrows */}
+      <div className={"relative flex items-center gap-6 "+(open ? "max-w-2xl" : "")}>
+        <h3 className="font-heading italic text-white text-2xl md:text-3xl whitespace-nowrap shrink-0">{title}</h3>
+        {!open && snippet && <p className="hidden md:block flex-1 truncate text-[13px] text-white/55 font-body font-light">{snippet}</p>}
+        {children && <button onClick={()=>setOpen(o=>!o)}
+          className="ml-auto shrink-0 liquid-glass rounded-full px-4 py-2 text-[11px] tracking-[0.2em] text-white/80 font-body hover:text-white">
+          {open ? "READ LESS ▴" : "READ MORE ▾"}
+        </button>}
+      </div>
+      {open && children &&
+        <div className="relative mt-5 pb-2 space-y-4 text-[13px] md:text-sm text-white/80 font-body font-light leading-relaxed">{children}</div>}
+    </div>
+  )
+}
+
+function ShieldExplain(){
+  return (
+    <Explain title="Space Weather Explained"
+      snippet="Space Weather renders the Earth with its magnetic field lines during a real solar storm, the event of July 4 to 11, 2026, measured minute by minute by NOAA's SWFO-L1 spacecraft, stationed a million and a half kilometres sunward, where the solar wind passes first.">
+      <p><i>Space Weather</i> renders the Earth with its magnetic field lines during a real solar
+        storm, the event of July 4 to 11, 2026, measured minute by minute by NOAA's SWFO-L1
+        spacecraft, stationed a million and a half kilometres sunward, where the solar wind
+        passes first.</p>
+      <p>The blue particles simulate the solar wind, a thin gas of charged particles, mostly
+        protons and electrons, boiling off the Sun's corona, millions of degrees hot, and blowing
+        outward in every direction. As the solar wind nears Earth, the magnetosphere deflects it
+        and prevents it from entering the atmosphere, acting as a shield. This is illustrated as
+        the blue particles slide past, while the field lines curve back into the Earth at the
+        magnetic poles. The magnetosphere is created by a molten iron core deep inside the Earth,
+        which churns like a dynamo and generates a magnetic field that reaches far into space.
+        Without it, the solar wind would slowly strip Earth's atmosphere into space, the same
+        fate that dried out Mars, and the Sun's radiation would reach the ground.</p>
+      <p>The solar wind carries the Sun's own magnetic field. When the field points opposite to
+        Earth's, the two merge in a process called magnetic reconnection and unzip an opening in
+        the shield. Particles pour through and funnel down the field lines to the poles,
+        illustrated by the pink particles. This is common during a solar storm, when the Sun's
+        field points hard southward. Aurora, the northern lights and their southern twin, appears
+        where the particles entering the atmosphere excite oxygen and nitrogen in the upper
+        atmosphere, which release that energy as light glowing in green, deep red, blue and
+        violet. The aurora is the visible edge of the shield at work.</p>
+    </Explain>
+  )
+}
+
+// approved text (Lior 2026-07-19) — VERBATIM, do not polish. Layout mirrors ShieldIntro
+// (left column, justify-center, same type scale); amber tones + reel stay Heat's identity.
+function HeatIntro(){
+  return (
+    <div className="vslide relative w-screen h-screen overflow-hidden bg-black">
+      <Reel name="heat" dim="linear-gradient(90deg,rgba(10,4,0,.92) 0%,rgba(10,4,0,.5) 45%,rgba(10,4,0,.12) 100%)"/>
+      <div className="relative z-10 h-full flex flex-col justify-center px-6 md:px-16 lg:px-24 max-w-2xl">
+        <motion.div {...rise(0)} className="font-body text-xs tracking-[0.4em] text-amber-200/90">ISLAND IN HEAT</motion.div>
+        <motion.h2 {...rise(0.1)} className="mt-4 font-heading italic text-white text-6xl md:text-8xl tracking-[-3px] leading-[0.85]"
+          style={{textShadow:"0 0 60px rgba(255,140,40,.35)"}}>Heat<br/>Island</motion.h2>
+        <motion.p {...rise(0.2)} className="mt-7 text-base md:text-lg text-white/90 font-body font-light leading-relaxed">
+          The relative warmth of a city compared with surrounding areas, often referred to as
+          "heat island" is caused by heat trapping due to land use, design of the built
+          environment, the heat absorbing properties of urban building materials, reduced
+          greenery and water features, and heat emissions generated directly from human
+          activities. The heat island mechanism is simulated on New York City urban areas,
+          a literal island of heat, compared to its cooler surroundings. While heat island is
+          not caused by climate change, the two stack, and feed off each other. Warming makes
+          heat waves more frequent, and heat island temperature rise on top of that, causing
+          health risks.
+        </motion.p>
+        <motion.div {...rise(0.4)}><Enter cls="border border-amber-200/30">ENTER THE CITY</Enter></motion.div>
+      </div>
+      <ScrollCue/>
+    </div>
+  )
+}
+
+// approved text (Lior 2026-07-19) — VERBATIM, do not polish
+function HeatExplain(){
+  return (
+    <Explain title="Heat Island Explained"
+      snippet="Heat Island renders 45,116 Manhattan buildings, each colored by the surface temperature of its own roof, measured from orbit by the thermal cameras of Landsat 5, 7, 8 and 9 (a NASA and USGS program), at 30 metres per pixel, over 23 summers, 2004 to 2026.">
+      <p><i>Heat Island</i> renders 45,116 Manhattan buildings, each colored by the surface
+        temperature of its own roof, measured from orbit by the thermal cameras of Landsat
+        5, 7, 8 and 9 (a NASA and USGS program), at 30 metres per pixel, over 23 summers,
+        2004 to 2026. Each year on the timeline is a median of the two clearest summer scenes
+        of that year, from the Microsoft Planetary Computer archive, which removes clouds and
+        the stripe defect of Landsat 7.</p>
+      <p>The satellites measure surface temperature, what the roof itself radiates, not the
+        air above it. Dark roofs and asphalt absorb the sun's heat and hold it, vegetation
+        and water release it, so the city runs hotter than its surroundings. In the July 2026
+        heat wave Manhattan was 8.5 degrees Celsius hotter than its surroundings. The median
+        roof warmed 0.4 degrees Celsius per decade. Some roofs are warming 3 times faster
+        than others, while roofs converted to white actually cooled. Green areas like Central Park are way cooler, the park sits as a cool gap in
+        the middle of the hot grid.</p>
+    </Explain>
+  )
+}
+
+function Moire(){
+  const rings = []
+  for (let i=0;i<26;i++) rings.push(
+    <ellipse key={i} cx="300" cy="300" rx={40+i*10.5} ry={40+i*10.2+Math.sin(i*1.7)*6}
+      fill="none" stroke="rgba(200,230,255,0.5)" strokeWidth="0.7"/>)
+  return (
+    <div className="absolute inset-0 flex items-center justify-center pointer-events-none" aria-hidden>
+      <svg viewBox="0 0 600 600" className="moire w-[130vmin] h-[130vmin] opacity-[0.16]">{rings}</svg>
+      <svg viewBox="0 0 600 600" className="moire2 w-[128vmin] h-[128vmin] opacity-[0.12] absolute">{rings}</svg>
+    </div>
+  )
+}
+
+// layout mirrors ShieldIntro (left column, same type scale); moire + cool tones stay Rings'
+// identity. Text approved-for-now by Lior 2026-07-19 — VERBATIM, do not polish.
+function RingsIntro(){
+  return (
+    <div className="vslide relative w-screen h-screen overflow-hidden" style={{background:"radial-gradient(90% 90% at 50% 42%, #0a1016 0%, #05070b 55%, #000 100%)"}}>
+      <Reel name="rings" dim="linear-gradient(90deg,rgba(3,6,10,.92) 0%,rgba(3,6,10,.5) 45%,rgba(3,6,10,.12) 100%)"/>
+      <Moire/>
+      <div className="relative z-10 h-full flex flex-col justify-center px-6 md:px-16 lg:px-24 max-w-2xl">
+        <motion.div {...rise(0)} className="font-body text-xs tracking-[0.4em] text-sky-100/70">THE EARTH RINGS</motion.div>
+        <motion.h2 {...rise(0.1)} className="mt-4 font-heading italic text-6xl md:text-8xl tracking-[-3px] leading-[0.85]"
+          style={{color:"#dce9f5", textShadow:"0 0 50px rgba(150,200,255,.25)"}}>Earth<br/>Sound</motion.h2>
+        <motion.p {...rise(0.2)} className="mt-7 text-base md:text-lg font-body font-light leading-relaxed" style={{color:"rgba(220,233,245,.9)"}}>
+          The Earth's crust is always moving, vast plates of rock pushing against each other,
+          storing stress for centuries, until its release in the form of an earthquake. A rock
+          gives way, a fault snaps and slips, and the stored energy tears loose in seconds,
+          shaking the ground, raising tsunamis, flattening cities. In its aftermath, the Earth
+          left vibrating for hours, waves roll around the surface and pass straight through the
+          core. One desert seismometer in New Mexico, one of thousands listening worldwide,
+          records that motion, too slow and too deep for human ears. Sped up four hundred times,
+          the recording lands in the range of hearing. The Earth becomes audible.
+        </motion.p>
+        <motion.div {...rise(0.4)}><Enter cls="border border-sky-100/25">ENTER · SOUND ON</Enter></motion.div>
+      </div>
+      <ScrollCue/>
+    </div>
+  )
+}
+
+// text approved-for-now by Lior 2026-07-19 — VERBATIM, do not polish (spelling quirks included)
+function RingsExplain(){
+  return (
+    <Explain title="Earth Sound Explained"
+      wash="linear-gradient(115deg, rgba(110,150,255,.07) 0%, rgba(150,110,255,.05) 40%, rgba(255,150,215,.06) 75%, rgba(110,150,255,.04) 100%)"
+      snippet="Earth Sound plays the seismogram, the sound of the Earth moving. Five great earthquakes are recordded and played.">
+      <p>Earth Sound plays the seismogram, the sound of the Earth moving. Five great
+        earthquakes are recordded and played. The Tōhoku-Oki quake of 2011 (magnitude 9.1),
+        Sumatra-Andaman of 2004 (magnitude 9.1, the longest rupture ever recorded, about
+        9 minutes), the Bolivia deep focus quake of 1994 (magnitude 8.2), Haiti of 2010
+        (magnitude 7.0), and the Hunga Tonga eruption of 2022, plus one year of Earth,
+        547 quakes of magnitude 5.5 and above, compressed into 75 seconds.</p>
+      <p>Earthquakes cause rocks vibration, and vibreation is sound. When a distant quake's
+        waves arrive, the ground in New Mexico truly swings back and forth, too slowly and
+        gently for anyone standing there to feel, and the seismometer writes that motion
+        down. Seismic waves oscillate below the ear's range, so played 400 times faster the
+        pitch rises into hearing. Each wave has its own arrival time. P waves come first,
+        a pulse of compression racing through the planet's body. S waves follow, slower,
+        a shear that only solid rock can carry, they vanish where the outer core is liquid.
+        Last come the surface waves, the great rollers that circle the globe, sometimes more
+        than once, and ring for hours. On the globe the wavefront crosses exactly when you
+        hear it reach the station, and the interior view shows the waves bending through the
+        mantle and the core.</p>
+      <p>Your ear separates what your eye cannot, based on the wave type propegation. The
+        Bolivia quake broke 631 kilometres down, so deep it made almost no surface waves,
+        a single clean crack. Haiti broke 13 kilometres under a city and roars. After the
+        greatest quakes the Earth keeps ringing long after the shaking ends.</p>
+      <Row label="MEASURED">
+        <span className="text-xs font-body liquid-glass rounded-full px-3 py-1" style={{color:"rgba(220,233,245,.9)"}}>Station ANMO, New Mexico · Global Seismographic Network</span>
+        <span className="text-xs font-body liquid-glass rounded-full px-3 py-1" style={{color:"rgba(220,233,245,.9)"}}>5 great quakes 1994–2022 · + 547 events, one year</span>
+      </Row>
+      <Row label="INSPIRATION">
+        <span className="text-xs font-body" style={{color:"rgba(220,233,245,.65)"}}>
+          Columbia Seismic Sound Lab, <i>SeismoDome</i> · Olafur Eliasson, <i>A&nbsp;symphony of disappearing sounds for the Great Salt Lake</i> (2026)</span>
+      </Row>
+      <System tone="rgba(180,215,245,.55)" steps={["seismometer archive","waveforms + ray physics","Web Audio 400×","globe in sync","machine-verified"]}/>
+    </Explain>
+  )
+}
+
+// ══════════ the app: horizontal pager of vertical projects ══════════
+const PROJECTS = [
+  { id:"shield", label:"Space Weather", src:"magnetosphere.html", Intro: ShieldIntro, Explain: ShieldExplain },
+  { id:"heat",   label:"Heat Island",   src:"heatdecades.html",   Intro: HeatIntro, Explain: HeatExplain },
+  { id:"rings",  label:"Earth Sound",   src:"seismic.html",       Intro: RingsIntro, Explain: RingsExplain },
+]
+
+function App(){
+  const wrap = useRef(null)
+  const [idx, setIdx] = useState(0)
+  const go = i => {
+    const w = wrap.current
+    w.scrollTo({ left: Math.max(0, Math.min(i, PROJECTS.length-1)) * w.clientWidth, behavior: 'smooth' })
+  }
+  useEffect(()=>{
+    const w = wrap.current
+    const onScroll = () => setIdx(Math.round(w.scrollLeft / w.clientWidth))
+    w.addEventListener('scroll', onScroll, { passive: true })
+    const onKey = e => {
+      if (e.key === 'ArrowRight') go(Math.round(w.scrollLeft / w.clientWidth) + 1)
+      if (e.key === 'ArrowLeft')  go(Math.round(w.scrollLeft / w.clientWidth) - 1)
+    }
+    addEventListener('keydown', onKey)
+    // re-snap the pager on window resize so a panel never sits half-shifted (right side "chopped")
+    const onResize = () => w.scrollTo({ left: Math.round(w.scrollLeft / w.clientWidth) * w.clientWidth })
+    addEventListener('resize', onResize)
+    return () => { w.removeEventListener('scroll', onScroll); removeEventListener('keydown', onKey); removeEventListener('resize', onResize) }
+  },[])
+  return (
+    <div className="bg-black h-screen w-screen overflow-hidden">
+      {/* nav */}
+      <div className="fixed top-4 left-0 right-0 px-6 lg:px-14 z-50 flex items-center justify-between pointer-events-none">
+        <div className="w-11 h-11"/>
+        <div className="flex items-center liquid-glass rounded-full px-1.5 py-1.5 pointer-events-auto">
+          {PROJECTS.map((p,i)=>(
+            <button key={p.id} onClick={()=>go(i)}
+              className={"px-4 py-2 text-sm font-body "+(idx===i?"text-white":"text-white/60 hover:text-white/90")}>
+              {p.label}</button>))}
+        </div>
+        <div className="w-11 h-11"/>
+      </div>
+
+      {/* horizontal pager */}
+      <div ref={wrap} className="hwrap h-screen w-screen overflow-x-auto overflow-y-hidden flex">
+        {PROJECTS.map((p,i)=>(
+          <section key={p.id} className="panel w-screen h-screen shrink-0 overflow-y-auto overflow-x-hidden">
+            <p.Intro/>
+            <div className="vslide relative w-screen h-screen bg-black flex flex-col">
+              <div className="relative flex-1 min-h-0">
+                {idx===i
+                  ? <iframe src={p.src + "?v=mrrtr00y"} className="w-full h-full border-0" allow="autoplay"/>
+                  : <div className="w-full h-full flex items-center justify-center text-white/30 font-body text-xs tracking-[0.3em]">INSTRUMENT SLEEPS UNTIL YOU ARRIVE</div>}
+                {/* single arrow back to the intro — no menu (Lior 2026-07-18) */}
+                <button onClick={e=>{ const el=e.target.closest('.panel'); el.scrollTo({top:0, behavior:'smooth'}) }}
+                  title="Back to intro"
+                  className="absolute top-20 left-1/2 -translate-x-1/2 liquid-glass rounded-full w-11 h-11 flex items-center justify-center text-white/75 hover:text-white text-lg leading-none">↑</button>
+              </div>
+              {p.Explain && <p.Explain/>}
+            </div>
+          </section>
+        ))}
+      </div>
+
+      {/* horizontal arrows — midpage, same position in all projects (Lior 2026-07-19) */}
+      {idx < PROJECTS.length-1 && (
+        <button onClick={()=>go(idx+1)}
+          className="fixed right-5 top-1/2 -translate-y-1/2 z-50 liquid-glass rounded-full pl-4 pr-3 py-2.5 flex items-center gap-2 text-white/85 hover:text-white">
+          <span className="text-[10px] font-body tracking-[0.25em]">{PROJECTS[idx+1].label.toUpperCase()}</span>
+          <span className="nudge text-lg leading-none">→</span>
+        </button>
+      )}
+      {idx > 0 && (
+        <button onClick={()=>go(idx-1)}
+          className="fixed left-5 top-1/2 -translate-y-1/2 z-50 liquid-glass rounded-full pl-3 pr-4 py-2.5 flex items-center gap-2 text-white/70 hover:text-white">
+          <span className="text-lg leading-none">←</span>
+          <span className="text-[10px] font-body tracking-[0.25em]">{PROJECTS[idx-1].label.toUpperCase()}</span>
+        </button>
+      )}
+
+    </div>
+  )
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>)
+</script>
+</body>
+</html>

@@ -1,0 +1,893 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>THE EARTH RINGS — earthquakes, audified</title>
+  <style>
+    html,body{margin:0;height:100%;background:#020308;overflow:hidden}
+    #gl,#cv{display:block;position:fixed;inset:0}
+    #cv{pointer-events:none}
+    #ui{position:fixed;inset:0;pointer-events:none;font:12px ui-monospace,"SF Mono",Menlo,monospace;color:#9aa3b5}
+    #title{position:absolute;top:26px;left:28px;letter-spacing:.06em}
+    #read{position:absolute;top:26px;right:28px;text-align:right;letter-spacing:.1em;line-height:1.9;font-size:11px}
+    #read b{color:#e8ebf2;font-weight:600}
+    #bigm{position:absolute;left:28px;bottom:162px;font-size:38px;font-weight:200;color:#cfe0ff;letter-spacing:.04em}
+    #bigm small{font-size:11px;color:#5c6577;letter-spacing:.2em;display:block;margin-top:2px}
+    #events{position:absolute;left:0;right:0;bottom:0;display:flex;pointer-events:auto}
+    .ev{flex:1;border-top:1px solid #1c2130;padding:14px 14px 16px;cursor:pointer;letter-spacing:.1em;background:rgba(2,3,8,.78)}
+    .ev:hover{background:#0a0d18}
+    .ev.on{border-top-color:#cfe0ff;background:#0a0d18}
+    .ev .n{color:#e8ebf2;font-size:11px;letter-spacing:.18em}
+    .ev .m{color:#cfe0ff;font-size:11px;margin-top:3px}
+    .ev .d{color:#5c6577;font-size:9.5px;margin-top:5px;line-height:1.6;letter-spacing:.08em}
+    /* stacked PAUSE + SPEED, same tokens as magnetosphere's controls (Lior 2026-07-19) */
+    #ctl{position:absolute;right:28px;bottom:195px;pointer-events:auto;display:flex;flex-direction:column;gap:5px;width:158px;z-index:2}
+    #ctl button{background:none;border:1px solid #2a3040;color:#9aa3b5;font:10px ui-monospace,Menlo,monospace;
+      letter-spacing:.15em;padding:4px 0;cursor:pointer;border-radius:2px}
+    #ctl button:hover{border-color:#5c6577;color:#e8ebf2}
+    #ctl button.on{border-color:#cfe0ff;color:#e6eeff}
+    #ctl .row{display:flex;gap:5px;align-items:center}
+    #ctl .row button{flex:1;padding:3px 0}
+    #ctl .lbl{color:#5c6577;font:9px ui-monospace,Menlo,monospace;letter-spacing:.14em}
+    #ctl.dim{opacity:.3;pointer-events:none}
+    #hint{position:absolute;bottom:162px;right:28px;font-size:10px;color:#3d4454;letter-spacing:.16em;text-align:right}
+    #load{position:absolute;top:44%;left:50%;transform:translate(-50%,-50%);color:#5c6577;letter-spacing:.3em;font-size:11px}
+  </style>
+</head>
+<body>
+  <canvas id="gl"></canvas>
+  <canvas id="cv"></canvas>
+  <div id="ui">
+    <div id="read"></div>
+    <div id="bigm">— <small>UTC AT THE STATION · SOUND = THE SEISMOGRAM, NOT A SIMULATION</small></div>
+    <div id="ctl">
+      <button id="pp">PAUSE</button>
+      <div class="row">
+        <span class="lbl">SPEED</span>
+        <button data-sp="200">200×</button><button data-sp="400" class="on">400×</button><button data-sp="800">800×</button>
+      </div>
+    </div>
+    <div id="hint">CLICK AN EVENT · DRAG THE EARTH · CLICK THE RING TO SCRUB</div>
+    <div id="load">CHOOSE AN EVENT BELOW — THE PLANET HAS BEEN WAITING</div>
+    <div id="events"></div>
+  </div>
+
+  <script type="importmap">
+  { "imports": {
+    "three": "https://unpkg.com/three@0.171.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.171.0/examples/jsm/"
+  } }
+  </script>
+  <script type="module">
+    import * as THREE from 'three'
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+    import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
+    import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
+    import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
+    import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js'
+    import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
+
+    // ---------------- TASTE ----------------
+    const T = {
+      ink:      '#d8c9a3',
+      coast:    '#9aa6c0',      // silver coastlines
+      graticule: '#8f98ad',     // thin silver lat/lon
+      grain:    0.010,          // finishing grain — a whisper, not a texture
+      // flower iridescence (Lior 2026-07-19): pink / purple / light blue / light yellow.
+      // colour = how deep the wave travels: pale yellow (surface) -> light blue (mantle) -> purple (deepest).
+      cP:       [0.74, 0.58, 1.0],          // P dives deepest -> purple
+      cS:       [0.60, 0.80, 1.0],          // S rides the mantle -> light blue
+      cR:       [1.0, 0.95, 0.72],          // surface waves stay shallow -> light yellow
+      vP: 10.5, vS: 5.8, vR: 3.7,          // km/s surface sweep (catalog fallback; events use IASP91 curves)
+      wP: 30, wS: 45,                       // front width in seconds (arrival-locus rendering)
+      rayP:    '#ab8bff', rayS: '#9fc8ff', rayCore: '#ff9fd8',   // interior rays: purple / blue / pink
+      flashShallow: '#ffedad',              // catalog flash, shallow -> light yellow
+      flashDeep:    '#a473ff',              // catalog flash, deep -> purple
+      ringR:    0.42,
+      ringAmp:  0.07,
+      bloom:    { strength: 0.85, radius: 0.55, threshold: 0.5 },   // glow budget = the data, never the planet
+      reverbSec: 2.8, wet: 0.3,
+      hpEarthHz: 0.7, lpEarthHz: 0.5,
+      mixes: { full: [1.0, 1.35], body: [1.7, 0], surface: [0, 1.9] },
+      catDur:    75,                        // one year as 75 seconds
+      breath:    0.010,                     // free-oscillation amplitude (radius fraction)
+      idleSpin:  0.02,                      // rad/s
+    }
+    // ---------------------------------------
+
+    const EVIDS = ['tohoku', 'sumatra', 'bolivia', 'haiti', 'tonga']
+    const cache = {}
+    let ev = null, mode = 'wave', speed = 400, fmode = 'full'
+    let curFrac = 0, playing = false
+
+    // --- three scene ---
+    const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('gl'), antialias: true })
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
+    renderer.setSize(innerWidth, innerHeight)
+    const scene = new THREE.Scene()
+    scene.background = new THREE.Color('#020308')
+    const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 100)
+    camera.position.set(0, 0.5, 4.25)
+    const controls = new OrbitControls(camera, renderer.domElement)
+    controls.enableDamping = true; controls.dampingFactor = 0.06
+    controls.enablePan = false; controls.minDistance = 1.6; controls.maxDistance = 8
+    // lift the globe above the event-card band — its bottom was cut off (Lior 2026-07-19)
+    controls.target.set(0, -0.35, 0)
+    controls.autoRotate = true; controls.autoRotateSpeed = 0.35
+    const composer = new EffectComposer(renderer)
+    composer.addPass(new RenderPass(scene, camera))
+    composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight),
+      T.bloom.strength, T.bloom.radius, T.bloom.threshold))
+    // finishing: film grain (kills dark-gradient banding) + vignette
+    const finish = new ShaderPass({
+      uniforms: { tDiffuse: { value: null }, uT: { value: 0 }, uGrain: { value: T.grain } },
+      vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.); }`,
+      fragmentShader: `
+        uniform sampler2D tDiffuse; uniform float uT, uGrain; varying vec2 vUv;
+        float h(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7)) + uT) * 43758.5453); }
+        void main(){
+          vec4 c = texture2D(tDiffuse, vUv);
+          float d = distance(vUv, vec2(.5));
+          c.rgb *= 1. - 0.30 * smoothstep(.42, .95, d);
+          c.rgb += (h(vUv * 917.) - .5) * uGrain;
+          gl_FragColor = c;
+        }`,
+    })
+    composer.addPass(finish)
+    composer.addPass(new OutputPass())
+
+    const ll2v = (lat, lon, r = 1) => {
+      const la = lat * Math.PI / 180, lo = lon * Math.PI / 180
+      return new THREE.Vector3(r * Math.cos(la) * Math.cos(lo), r * Math.sin(la), -r * Math.cos(la) * Math.sin(lo))
+    }
+
+    // stars
+    {
+      const n = 1200, p = new Float32Array(n * 3)
+      for (let i = 0; i < n; i++) {
+        const v = new THREE.Vector3().randomDirection().multiplyScalar(40)
+        p.set([v.x, v.y, v.z], i * 3)
+      }
+      const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(p, 3))
+      scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: '#3a4258', size: 0.05, transparent: true, opacity: 0.8 })))
+    }
+
+    // globe: ripples + free-oscillation breathing
+    const gU = {
+      uEpi: { value: new THREE.Vector3(1, 0, 0) },
+      uGT: { value: -1 },            // ground seconds since rupture (<0 = off)
+      uAmpBody: { value: 0 },        // body layer drives P + S fronts
+      uAmpSurf: { value: 0 },        // surface layer drives R front
+      uBreath: { value: 0 },         // 0S2 breathing amplitude
+      uTime: { value: 0 },
+      uCP: { value: new THREE.Vector3(...T.cP) },
+      uCS: { value: new THREE.Vector3(...T.cS) },
+      uCR: { value: new THREE.Vector3(...T.cR) },
+      uV: { value: new THREE.Vector3(T.vP, T.vS, T.vR) },
+      uCurve: { value: null },       // 91x1 RG float: IASP91 first-arrival times (P, S) vs distance
+      uHasCurve: { value: 0 },
+      uW: { value: new THREE.Vector2(T.wP, T.wS) },
+      uInterior: { value: 0 },
+    }
+    const earthTex = new THREE.TextureLoader().load('earth-dark.jpg')
+    earthTex.colorSpace = THREE.SRGBColorSpace
+    gU.uMap = { value: earthTex }
+    const globe = new THREE.Mesh(new THREE.SphereGeometry(1, 128, 128), new THREE.ShaderMaterial({
+      uniforms: gU,
+      vertexShader: `
+        uniform float uBreath, uTime;
+        varying vec3 vP; varying vec3 vN; varying vec3 vV; varying vec2 vUv;
+        void main(){
+          vP = normalize(position);
+          vUv = uv;
+          // 0S2 "football" mode — the gravest tone of the planet (T~54 min; 8.1 s at 400x)
+          float y20 = 3. * vP.y * vP.y - 1.;
+          vec3 disp = position * (1. + uBreath * y20 * sin(uTime * 6.28318 / 8.1));
+          vN = normalize(normalMatrix * normal);
+          vec4 mv = modelViewMatrix * vec4(disp, 1.);
+          vV = normalize(-mv.xyz);
+          gl_Position = projectionMatrix * mv;
+        }`,
+      transparent: true,
+      fragmentShader: `
+        uniform vec3 uEpi, uCP, uCS, uCR, uV;
+        uniform float uGT, uAmpBody, uAmpSurf, uHasCurve, uInterior, uTime;
+        uniform vec2 uW;
+        uniform sampler2D uCurve; uniform sampler2D uMap;
+        varying vec3 vP; varying vec3 vN; varying vec3 vV; varying vec2 vUv;
+        float front(float th, float f, float w){
+          float m = mod(f, 6.28318);
+          float e = m > 3.14159 ? 6.28318 - m : m;
+          float d = (th - e) / w;
+          // surface waves are a dispersed TRAIN: sharp leading edge, rippling tail
+          float lead = exp(-d * d * 4.);
+          float tail = d < 0. ? exp(d * 0.55) * (0.45 + 0.55 * cos(d * 4.2)) : 0.;
+          return max(lead, tail) / (1. + f * 0.5);
+        }
+        // the front is the locus of arrivals happening NOW — IASP91 table, shadow zones included
+        float arrivalFront(float th, float tArr, float w){
+          if (tArr < 0.) return 0.;
+          float d = (uGT - tArr) / w;
+          float lead = exp(-d * d);
+          float ring = d > 0. ? exp(-d * 0.5) * (0.35 + 0.65 * cos(d * 3.4)) * 0.5 : 0.;
+          return max(lead, ring) / (1. + th * 0.4);
+        }
+        vec2 curveAt(float th){
+          // manual linear interp between 2-deg texels (float-linear isn't guaranteed)
+          float u = th / 3.14159 * 91.0 - 0.5;
+          float i0 = clamp(floor(u), 0., 90.), f = clamp(u - i0, 0., 1.);
+          vec2 a = texture2D(uCurve, vec2((i0 + .5) / 91., .5)).rg;
+          vec2 b = texture2D(uCurve, vec2((min(i0 + 1., 90.) + .5) / 91., .5)).rg;
+          if (a.r < 0. || b.r < 0.) { if (f > .5) a.r = b.r; }
+          else a.r = mix(a.r, b.r, f);
+          if (a.g < 0. || b.g < 0.) { if (f > .5) a.g = b.g; }
+          else a.g = mix(a.g, b.g, f);
+          return a;
+        }
+        void main(){
+          float th = acos(clamp(dot(vP, uEpi), -1., 1.));
+          // ─── petal glass (Lior 2026-07-19, flower ref): the moiré stripes carried no data, so
+          // they are gone. A faint iridescent sheen drifts with viewing angle and quivers with the
+          // sound; the wavefronts carry all the light.
+          float q = uAmpSurf * sin(uTime * 9.) + uAmpBody * sin(uTime * 23.);   // the sound makes it quiver
+          vec3 col = vec3(0.014, 0.018, 0.032);
+          float fr = 1. - abs(dot(vN, vV));
+          // flower iridescence, unmissable this time: light blue / purple / pink / pale yellow
+          // petals drifting with viewing angle, breathing with the sound
+          float hph = fr*3.0 + th*2.0 + uTime*0.06 + q*2.0;
+          vec3 iA = vec3(0.55,0.75,1.0);   // light blue
+          vec3 iB = vec3(0.72,0.52,1.0);   // purple
+          vec3 iC = vec3(1.0,0.62,0.86);   // pink
+          vec3 iD = vec3(1.0,0.94,0.66);   // light yellow
+          vec3 iri = mix(mix(iA,iB,0.5+0.5*sin(hph)), mix(iC,iD,0.5+0.5*sin(hph*0.83+2.1)),
+                         0.35+0.35*sin(hph*0.41+0.7));
+          col += iri * pow(fr, 1.5) * 0.34;   // strong petal rim
+          col += iri * 0.05;                  // whisper across the whole face
+          vec3 tex = texture2D(uMap, vUv).rgb;
+          col += tex * vec3(0.55,0.64,0.80) * 0.40;
+          float rim = pow(fr, 3.);
+          col += vec3(0.10,0.16,0.28) * rim;
+          float weave = 1.0;                             // clean sphere — wave light no longer lives in stripes
+          if (uGT > 0.) {
+            float ab = 0.25 + uAmpBody*2.0;
+            float as = 0.25 + uAmpSurf*1.8;
+            // intensity whitens the crests — colour carries energy
+            vec3 cR = mix(uCR, vec3(1.), clamp(uAmpSurf*0.5, 0., .55));
+            vec3 cS = mix(uCS, vec3(1.), clamp(uAmpBody*0.4, 0., .45));
+            // gains rescaled ~0.4x when the stripe weave (avg ~0.4) became a clean sphere —
+            // same perceived energy, no blown-out epicenter
+            if (uHasCurve > 0.5) {
+              vec2 tt = curveAt(th);
+              col += uCP * arrivalFront(th, tt.r, uW.x) * 0.22 * ab * weave;
+              col += cS  * arrivalFront(th, tt.g, uW.y) * 0.33 * ab * weave;
+            } else {
+              col += uCP * front(th, uV.x*uGT/6371., 0.045) * 0.21 * ab * weave;
+              col += cS  * front(th, uV.y*uGT/6371., 0.055) * 0.29 * ab * weave;
+            }
+            col += cR * front(th, uV.z*uGT/6371., 0.065) * 0.72 * as * weave;
+          }
+          col *= 1. - uInterior*0.45;
+          gl_FragColor = vec4(col, 1. - uInterior*0.8);
+        }`,
+    }))
+    globe.renderOrder = 1
+    scene.add(globe)
+
+    // atmosphere shell
+    scene.add(new THREE.Mesh(new THREE.SphereGeometry(1.06, 64, 64), new THREE.ShaderMaterial({
+      transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.BackSide,
+      vertexShader: `varying vec3 vN,vV; void main(){ vN=normalize(normalMatrix*normal);
+        vec4 mv=modelViewMatrix*vec4(position,1.); vV=normalize(-mv.xyz); gl_Position=projectionMatrix*mv; }`,
+      fragmentShader: `varying vec3 vN,vV;
+        void main(){ float f=pow(1.-abs(dot(vN,vV)),2.5); gl_FragColor=vec4(vec3(0.16,0.30,0.55)*f, f*0.7); }`,
+    })))
+
+    // coastlines
+    const coast = await (await fetch('coast.json')).json()
+    {
+      const pts = []
+      for (const line of coast) for (let i = 0; i + 3 < line.length; i += 2)
+        pts.push(ll2v(line[i + 1], line[i], 1.004), ll2v(line[i + 3], line[i + 2], 1.004))
+      const cg = new THREE.BufferGeometry().setFromPoints(pts)
+      const cl = new THREE.LineSegments(cg, new THREE.LineBasicMaterial({
+        color: T.coast, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false }))
+      cl.renderOrder = 2   // after the (transparent) globe, or it gets painted over
+      scene.add(cl)
+    }
+
+    // thin silver graticule — 15-degree lat/lon grid
+    {
+      const pts = []
+      const seg = (a, b) => pts.push(a, b)
+      for (let lat = -75; lat <= 75; lat += 15)
+        for (let lon = -180; lon < 180; lon += 3)
+          seg(ll2v(lat, lon, 1.001), ll2v(lat, lon + 3, 1.001))
+      for (let lon = -180; lon < 180; lon += 15)
+        for (let lat = -87; lat < 87; lat += 3)
+          seg(ll2v(lat, lon, 1.001), ll2v(lat + 3, lon, 1.001))
+      const gg = new THREE.BufferGeometry().setFromPoints(pts)
+      const gl2 = new THREE.LineSegments(gg, new THREE.LineBasicMaterial({
+        color: T.graticule, transparent: true, opacity: 0.13, blending: THREE.AdditiveBlending, depthWrite: false }))
+      gl2.renderOrder = 2
+      scene.add(gl2)
+    }
+
+    // halftone land — the continents themselves carry the wave
+    {
+      const dots = await (await fetch('landdots.json')).json()
+      const n = dots.length / 2
+      const pos = new Float32Array(n * 3)
+      for (let i = 0; i < n; i++) {
+        const v = ll2v(dots[i * 2 + 1], dots[i * 2], 1.002)
+        pos[i * 3] = v.x; pos[i * 3 + 1] = v.y; pos[i * 3 + 2] = v.z
+      }
+      const dg = new THREE.BufferGeometry()
+      dg.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+      const dm = new THREE.ShaderMaterial({
+        transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+        uniforms: gU,   // shares the globe's uniforms: fronts, clock, curves
+        vertexShader: `
+          uniform vec3 uEpi, uCP, uCS, uCR, uV;
+          uniform float uGT, uAmpBody, uAmpSurf, uHasCurve, uInterior;
+          uniform vec2 uW;
+          uniform sampler2D uCurve;
+          varying vec3 vC; varying float vA;
+          float front(float th, float f, float w){
+            float m = mod(f, 6.28318);
+            float e = m > 3.14159 ? 6.28318 - m : m;
+            float d = (th - e) / w;
+            return exp(-d * d) / (1. + f * 0.5);
+          }
+          float arrivalFront(float th, float tArr, float w){
+            if (tArr < 0.) return 0.;
+            float d = (uGT - tArr) / w;
+            return exp(-d * d) / (1. + th * 0.4);
+          }
+          vec2 curveAt(float th){
+            float u = th / 3.14159 * 91.0 - 0.5;
+            float i0 = clamp(floor(u), 0., 90.), f = clamp(u - i0, 0., 1.);
+            vec2 a = texture2D(uCurve, vec2((i0 + .5) / 91., .5)).rg;
+            vec2 b = texture2D(uCurve, vec2((min(i0 + 1., 90.) + .5) / 91., .5)).rg;
+            if (a.r < 0. || b.r < 0.) { if (f > .5) a.r = b.r; } else a.r = mix(a.r, b.r, f);
+            if (a.g < 0. || b.g < 0.) { if (f > .5) a.g = b.g; } else a.g = mix(a.g, b.g, f);
+            return a;
+          }
+          void main(){
+            vec3 p = normalize(position);
+            float th = acos(clamp(dot(p, uEpi), -1., 1.));
+            vec3 base = vec3(0.022, 0.036, 0.065);
+            vec3 glow = vec3(0.);
+            if (uGT > 0.) {
+              float ab = 0.25 + uAmpBody * 2.0;
+              float as = 0.25 + uAmpSurf * 1.8;
+              if (uHasCurve > 0.5) {
+                vec2 tt = curveAt(th);
+                glow += uCP * arrivalFront(th, tt.r, uW.x) * 0.45 * ab;
+                glow += uCS * arrivalFront(th, tt.g, uW.y) * 0.6 * ab;
+              }
+              glow += uCR * front(th, uV.z * uGT / 6371., 0.065) * 0.9 * as;
+            }
+            vC = base + glow;
+            vA = 0.4 + min(length(glow), 1.) * 0.45;
+            // dots fade toward the limb — solid disc, not wireframe ball
+            float facing = dot(p, normalize(cameraPosition));
+            vA *= smoothstep(-0.05, 0.35, facing);
+            vec4 mv = modelViewMatrix * vec4(position, 1.);
+            gl_PointSize = (2.4 + min(length(glow), 1.) * 1.2) * (300. / -mv.z) / 100.;
+            gl_Position = projectionMatrix * mv;
+          }`,
+        fragmentShader: `
+          varying vec3 vC; varying float vA;
+          void main(){
+            float d = length(gl_PointCoord - .5);
+            if (d > .5) discard;
+            float a = smoothstep(.5, .15, d) * vA;
+            gl_FragColor = vec4(vC * 1.15, a);
+          }`,
+      })
+      const pts2 = new THREE.Points(dg, dm)
+      pts2.renderOrder = 2
+      scene.add(pts2)
+    }
+
+    // markers
+    const dotTex = (() => {
+      const c = document.createElement('canvas'); c.width = c.height = 128
+      const g = c.getContext('2d'), gr = g.createRadialGradient(64, 64, 0, 64, 64, 64)
+      gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.3, 'rgba(255,255,255,.5)'); gr.addColorStop(1, 'rgba(255,255,255,0)')
+      g.fillStyle = gr; g.fillRect(0, 0, 128, 128)
+      return new THREE.CanvasTexture(c)
+    })()
+    const epiDot = new THREE.Sprite(new THREE.SpriteMaterial({ map: dotTex, color: '#ff6a3d', blending: THREE.AdditiveBlending, depthWrite: false }))
+    const staDot = new THREE.Sprite(new THREE.SpriteMaterial({ map: dotTex, color: '#d8c9a3', blending: THREE.AdditiveBlending, depthWrite: false }))
+    epiDot.scale.setScalar(0.07); staDot.scale.setScalar(0.06)
+    scene.add(epiDot, staDot)
+    let arcLine = null
+    function setArc(a, b) {
+      if (arcLine) { scene.remove(arcLine); arcLine.geometry.dispose(); arcLine = null }
+      if (!a) return
+      const va = ll2v(a.lat, a.lon), vb = ll2v(b.lat, b.lon)
+      const pts = []
+      for (let i = 0; i <= 64; i++) pts.push(va.clone().lerp(vb, i / 64).normalize().multiplyScalar(1.012))
+      arcLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({ color: '#5c6577', transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false }))
+      scene.add(arcLine)
+    }
+
+    // --- interior: IASP91 ray paths through mantle and core, lit in sync with the clock ---
+    const rayGroup = new THREE.Group(); rayGroup.visible = false; scene.add(rayGroup)
+    let interior = false
+    function buildRays(evid) {
+      while (rayGroup.children.length) {
+        const c = rayGroup.children.pop(); c.geometry?.dispose(); c.material?.dispose()
+      }
+      const R = cache.rays[evid]; if (!R) return
+      const meta = cache[evid].meta
+      const e1 = ll2v(meta.epi.lat, meta.epi.lon)
+      const st = ll2v(meta.sta.lat, meta.sta.lon)
+      const e2 = st.clone().sub(e1.clone().multiplyScalar(st.dot(e1))).normalize()
+      const famColor = n => n.includes('K') ? T.rayCore : (n[0] === 'S' || n[0] === 's') ? T.rayS : T.rayP
+      for (const ph of R.phases) {
+        const pos = [], tArr = []
+        for (const [d, r, t] of ph.pts) {
+          const v = e1.clone().multiplyScalar(Math.cos(d) * r).addScaledVector(e2, Math.sin(d) * r)
+          pos.push(v.x, v.y, v.z); tArr.push(t)
+        }
+        const gg = new THREE.BufferGeometry()
+        gg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+        gg.setAttribute('aT', new THREE.Float32BufferAttribute(tArr, 1))
+        const m = new THREE.ShaderMaterial({
+          transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false,
+          uniforms: { uGT: gU.uGT, uC: { value: new THREE.Color(famColor(ph.name)) } },
+          vertexShader: `attribute float aT; varying float vT;
+            void main(){ vT = aT; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.); }`,
+          fragmentShader: `uniform float uGT; uniform vec3 uC; varying float vT;
+            void main(){
+              if (vT > uGT || uGT <= 0.) discard;
+              float a = 0.10 + 0.90 * exp(-(uGT - vT) / 130.);
+              gl_FragColor = vec4(uC * a * 2.6, a);
+            }`,
+        })
+        const line = new THREE.Line(gg, m); line.renderOrder = 3
+        rayGroup.add(line)
+      }
+      // mantle/core boundaries in the ray plane (CMB 2891 km, inner core 5150 km)
+      for (const r of [0.4535, 0.1917]) {
+        const pts = []
+        for (let i = 0; i <= 96; i++) {
+          const a = i / 96 * Math.PI * 2
+          pts.push(e1.clone().multiplyScalar(Math.cos(a) * r).addScaledVector(e2, Math.sin(a) * r))
+        }
+        const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+          new THREE.LineBasicMaterial({ color: '#2c3a55', transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }))
+        l.renderOrder = 2
+        rayGroup.add(l)
+      }
+    }
+    const dummyCurve = new THREE.DataTexture(new Float32Array([-1, -1]), 1, 1, THREE.RGFormat, THREE.FloatType)
+    dummyCurve.needsUpdate = true
+    gU.uCurve.value = dummyCurve
+
+    // catalog flash pool
+    const FLASHES = 64
+    const flashPool = []
+    for (let i = 0; i < FLASHES; i++) {
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: dotTex, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0 }))
+      s.visible = false; scene.add(s); flashPool.push(s)
+    }
+    const cShallow = new THREE.Color(T.flashShallow), cDeep = new THREE.Color(T.flashDeep)
+
+    // --- audio ---
+    let actx = null, srcNode = null, gBody = null, gSurf = null
+    let anaMaster = null, anaBody = null, anaSurf = null
+    let startCtxT = 0, startFrac = 0
+    let catNodes = [], catScheduledFrom = 0, percBuf = null
+    const anaBuf = new Float32Array(1024)
+    const rmsOf = a => {
+      if (!a) return 0
+      a.getFloatTimeDomainData(anaBuf)
+      let s = 0; for (let i = 0; i < anaBuf.length; i++) s += anaBuf[i] * anaBuf[i]
+      return Math.sqrt(s / anaBuf.length)
+    }
+    function ensureGraph() {
+      if (actx) return
+      actx = new AudioContext()
+      const comp = actx.createDynamicsCompressor()
+      comp.threshold.value = -35; comp.knee.value = 20; comp.ratio.value = 12
+      const makeup = actx.createGain(); makeup.gain.value = 2.4
+      const irLen = Math.floor(actx.sampleRate * T.reverbSec)
+      const ir = actx.createBuffer(2, irLen, actx.sampleRate)
+      for (let c = 0; c < 2; c++) {
+        const d = ir.getChannelData(c)
+        for (let i = 0; i < irLen; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / irLen, 2.6)
+      }
+      const conv = actx.createConvolver(); conv.buffer = ir
+      const wet = actx.createGain(); wet.gain.value = T.wet
+      const dry = actx.createGain(); dry.gain.value = 1
+      anaMaster = actx.createAnalyser(); anaMaster.fftSize = 1024
+      const out = actx.createGain(); out.gain.value = 1.4
+      comp.connect(makeup)
+      makeup.connect(dry); makeup.connect(conv); conv.connect(wet)
+      dry.connect(anaMaster); wet.connect(anaMaster)
+      anaMaster.connect(out); out.connect(actx.destination)
+      actx._sum = comp
+      anaBody = actx.createAnalyser(); anaBody.fftSize = 1024
+      anaSurf = actx.createAnalyser(); anaSurf.fftSize = 1024
+    }
+    function stopAll() {
+      if (srcNode) { try { srcNode.stop() } catch {} srcNode.disconnect(); srcNode = null }
+      for (const n of catNodes) { try { n.stop() } catch {} }
+      catNodes = []
+      playing = false
+    }
+    function buildWaveAudio(frac) {
+      ensureGraph(); stopAll()
+      const sps = ev.meta.sps, targetRate = sps * speed
+      const bufRate = Math.min(Math.max(targetRate, 8000), 96000)
+      const pr = targetRate / bufRate
+      const buf = actx.createBuffer(1, ev.v.length, bufRate)
+      const ch = buf.getChannelData(0)
+      for (let i = 0; i < ev.v.length; i++) ch[i] = ev.v[i] / 32768
+      srcNode = actx.createBufferSource()
+      srcNode.buffer = buf; srcNode.playbackRate.value = pr; srcNode.loop = true
+      const hp = actx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = T.hpEarthHz * speed; hp.Q.value = 0.7
+      const lp = actx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = T.lpEarthHz * speed; lp.Q.value = 0.7
+      const shelf = actx.createBiquadFilter(); shelf.type = 'lowshelf'; shelf.frequency.value = 0.12 * speed; shelf.gain.value = 6
+      gBody = actx.createGain(); gSurf = actx.createGain()
+      const [gb, gs] = T.mixes[fmode]
+      gBody.gain.value = gb; gSurf.gain.value = gs
+      srcNode.connect(hp); hp.connect(gBody); gBody.connect(actx._sum); gBody.connect(anaBody)
+      srcNode.connect(lp); lp.connect(shelf); shelf.connect(gSurf); gSurf.connect(actx._sum); gSurf.connect(anaSurf)
+      srcNode.start(0, frac * buf.duration)
+      startCtxT = actx.currentTime; startFrac = frac
+      playing = true
+    }
+    // percussion sample: the real Bolivia deep-focus P burst
+    function buildPerc() {
+      if (percBuf) return
+      const d = cache['bolivia']
+      const on = Math.floor(d.meta.onsetFrac * d.v.length)
+      const n = 14000
+      percBuf = actx.createBuffer(1, n, 8000)
+      const ch = percBuf.getChannelData(0)
+      for (let i = 0; i < n; i++) {
+        const w = Math.min(i / 300, 1) * Math.pow(1 - i / n, 1.6)
+        ch[i] = ((d.v[on - 400 + i] || 0) / 32768) * w
+      }
+    }
+    function buildCatAudio(frac) {
+      ensureGraph(); stopAll(); buildPerc()
+      const cat = cache.catalog, span = cat.e.at(-1)[0] - cat.e[0][0]
+      const t0 = cat.e[0][0]
+      startCtxT = actx.currentTime; startFrac = frac
+      catScheduledFrom = frac
+      // spatialize to the current view: pan by screen-x, near side louder
+      const camN = camera.position.clone().normalize()
+      const camRight = new THREE.Vector3().crossVectors(camN.clone().negate(), camera.up).normalize()
+      const dirV = new THREE.Vector3()
+      for (const [t, lat, lon, dep, mag] of cat.e) {
+        const off = ((t - t0) / span) * T.catDur - frac * T.catDur
+        if (off < 0) continue
+        const src = actx.createBufferSource(); src.buffer = percBuf
+        src.playbackRate.value = THREE.MathUtils.clamp(Math.pow(2, (6.3 - mag) * 0.5), 0.14, 2.4)
+        const lp = actx.createBiquadFilter(); lp.type = 'lowpass'
+        lp.frequency.value = dep < 70 ? 3200 : dep < 300 ? 1300 : 550    // depth = attenuation
+        dirV.copy(ll2v(lat, lon))
+        const g = actx.createGain()
+        g.gain.value = THREE.MathUtils.clamp(Math.pow(10, 0.7 * (mag - 7)), 0.02, 2.4) *
+          (0.55 + 0.45 * Math.max(dirV.dot(camN), 0))                    // far side of the planet = quieter
+        const pan = actx.createStereoPanner()
+        pan.pan.value = THREE.MathUtils.clamp(dirV.dot(camRight), -1, 1) * 0.8
+        src.connect(lp); lp.connect(g); g.connect(pan); pan.connect(actx._sum)
+        src.start(startCtxT + off)
+        catNodes.push(src)
+      }
+      playing = true
+    }
+
+    // --- events UI ---
+    const evBox = document.getElementById('events')
+    async function loadAll() {
+      for (const id of EVIDS) cache[id] = await (await fetch(`quakes/${id}.json`)).json()
+      cache.catalog = await (await fetch('quakes/catalog.json')).json()
+      cache.rays = await (await fetch('quakes/rays.json')).json()
+      for (const id of EVIDS) {
+        const d = cache[id]
+        const el = document.createElement('div')
+        el.className = 'ev'; el.id = 'ev_' + id
+        el.innerHTML = `<div class="n">${d.meta.name}</div><div class="m">M ${d.meta.mag.toFixed(1)} · ${d.meta.depth} KM DEEP</div><div class="d">${d.meta.note}</div>`
+        el.onclick = () => select(id)
+        evBox.appendChild(el)
+      }
+      const c = cache.catalog
+      const el = document.createElement('div')
+      el.className = 'ev'; el.id = 'ev_catalog'
+      el.innerHTML = `<div class="n">THE CATALOG</div><div class="m">${c.meta.count} EVENTS · M ≥ ${c.meta.minmag}</div>` +
+        `<div class="d">ONE YEAR OF EARTH AS ${T.catDur} SECONDS · EVERY QUAKE A DRUM HIT · KAMCHATKA M8.8 INCLUDED</div>`
+      el.onclick = () => selectCatalog()
+      evBox.appendChild(el)
+    }
+    function markOn(id) {
+      document.querySelectorAll('.ev').forEach(x => x.classList.toggle('on', x.id === 'ev_' + id))
+      document.getElementById('load')?.remove()
+    }
+    function select(id) {
+      mode = 'wave'; ev = cache[id]; markOn(id)
+      document.getElementById('ctl').classList.remove('dim')
+      gU.uEpi.value.copy(ll2v(ev.meta.epi.lat, ev.meta.epi.lon))
+      epiDot.visible = staDot.visible = true
+      epiDot.position.copy(ll2v(ev.meta.epi.lat, ev.meta.epi.lon, 1.01))
+      staDot.position.copy(ll2v(ev.meta.sta.lat, ev.meta.sta.lon, 1.01))
+      setArc(ev.meta.epi, ev.meta.sta)
+      const mid = ll2v(ev.meta.epi.lat, ev.meta.epi.lon).add(ll2v(ev.meta.sta.lat, ev.meta.sta.lon)).normalize()
+      camera.position.copy(mid.multiplyScalar(4.25)).add(new THREE.Vector3(0, 0.5, 0))
+      controls.autoRotate = true; controls.autoRotateSpeed = 0.12   // slow drift, never static
+      buildRays(id)
+      // IASP91 first-arrival curve -> texture (per-texel arrival times; nearest = honest sampling)
+      const cvd = cache.rays[id]?.curve
+      if (cvd) {
+        const n = cvd.pT.length
+        const arr = new Float32Array(n * 2)
+        for (let i = 0; i < n; i++) { arr[i * 2] = cvd.pT[i]; arr[i * 2 + 1] = cvd.sT[i] }
+        const t = new THREE.DataTexture(arr, n, 1, THREE.RGFormat, THREE.FloatType)
+        t.minFilter = t.magFilter = THREE.NearestFilter; t.needsUpdate = true
+        gU.uCurve.value = t; gU.uHasCurve.value = 1
+      } else gU.uHasCurve.value = 0
+      if (actx?.state === 'suspended') actx.resume()
+      buildWaveAudio(Math.max(ev.meta.onsetFrac - 0.02, 0))
+      ringCache = null
+    }
+    function selectCatalog() {
+      mode = 'cat'; ev = null; markOn('catalog')
+      document.getElementById('ctl').classList.add('dim')
+      epiDot.visible = staDot.visible = false
+      setArc(null)
+      gU.uGT.value = -1
+      gU.uHasCurve.value = 0
+      controls.autoRotate = true
+      if (actx?.state === 'suspended') actx.resume()
+      buildCatAudio(0)
+      ringCache = null
+    }
+
+    // --- controls ---
+    document.querySelectorAll('[data-sp]').forEach(b => b.onclick = () => {
+      speed = +b.dataset.sp
+      document.querySelectorAll('[data-sp]').forEach(x => x.classList.toggle('on', x === b))
+      if (ev && mode === 'wave') buildWaveAudio(curFrac)
+    })
+    document.querySelectorAll('[data-f]').forEach(b => b.onclick = () => {
+      fmode = b.dataset.f
+      document.querySelectorAll('[data-f]').forEach(x => x.classList.toggle('on', x === b))
+      if (gBody) { const [gb, gs] = T.mixes[fmode]; gBody.gain.value = gb; gSurf.gain.value = gs }
+    })
+    const ppBtn = document.getElementById('pp')
+    ppBtn.onclick = async () => {
+      if (!actx) return
+      if (actx.state === 'running') { await actx.suspend(); ppBtn.textContent = 'PLAY'; ppBtn.classList.add('on') }
+      else { await actx.resume(); ppBtn.textContent = 'PAUSE'; ppBtn.classList.remove('on') }
+    }
+
+    // INTERIOR button removed from the HUD (Lior 2026-07-19); the view stays reachable via setInterior
+    const intBtn = document.getElementById('interior')
+    if (intBtn) intBtn.onclick = () => { interior = !interior; intBtn.classList.toggle('on', interior) }
+    window.setInterior = on => { interior = on; intBtn?.classList.toggle('on', on) }
+
+    addEventListener('pointerdown', e => {
+      if (!mode || (!ev && mode === 'wave')) return
+      const cx = innerWidth / 2, cy = innerHeight * 0.42
+      const R = Math.min(innerWidth, innerHeight) * T.ringR
+      const r = Math.hypot(e.clientX - cx, e.clientY - cy)
+      if (Math.abs(r - R) < 46) {
+        const a = Math.atan2(e.clientY - cy, e.clientX - cx) + Math.PI / 2
+        const f = ((a / (2 * Math.PI)) + 1) % 1
+        mode === 'wave' ? buildWaveAudio(f) : buildCatAudio(f)
+      }
+    })
+
+    // --- 2D overlay ---
+    const cv = document.getElementById('cv'), g = cv.getContext('2d')
+    const read = document.getElementById('read'), bigm = document.getElementById('bigm')
+    let ringCache = null
+    function buildCatRing(cx, cy, R) {
+      const dp = Math.min(devicePixelRatio, 2)
+      const c = document.createElement('canvas'); c.width = innerWidth * dp; c.height = innerHeight * dp
+      const gg = c.getContext('2d'); gg.setTransform(dp, 0, 0, dp, 0, 0)
+      const cat = cache.catalog, t0 = cat.e[0][0], span = cat.e.at(-1)[0] - t0
+      gg.globalCompositeOperation = 'lighter'
+      for (const [t, , , dep, mag] of cat.e) {
+        const a = ((t - t0) / span) * Math.PI * 2 - Math.PI / 2
+        const len = 4 + Math.pow(mag - 5.4, 2.1) * 5
+        const col = cShallow.clone().lerp(cDeep, Math.min(dep / 600, 1))
+        gg.strokeStyle = `rgba(${col.r * 255 | 0},${col.g * 255 | 0},${col.b * 255 | 0},.75)`
+        gg.lineWidth = mag >= 7 ? 2 : 1
+        gg.beginPath()
+        gg.moveTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R)
+        gg.lineTo(cx + Math.cos(a) * (R + len), cy + Math.sin(a) * (R + len))
+        gg.stroke()
+      }
+      // month ticks
+      gg.globalCompositeOperation = 'source-over'
+      gg.fillStyle = 'rgba(92,101,119,.9)'; gg.font = '10px ui-monospace,Menlo,monospace'
+      for (let m = 0; m < 12; m++) {
+        const d = new Date(Date.UTC(2025, 6 + m, 1)).getTime() / 1000
+        const f = (d - t0) / span
+        if (f < 0 || f > 1) continue
+        const a = f * Math.PI * 2 - Math.PI / 2
+        gg.fillText('JASONDJFMAMJ'[m], cx + Math.cos(a) * (R - 20) - 3, cy + Math.sin(a) * (R - 20) + 3)
+      }
+      return c
+    }
+
+    function draw() {
+      const dp = Math.min(devicePixelRatio, 2)
+      if (cv.width !== innerWidth * dp) { cv.width = innerWidth * dp; cv.height = innerHeight * dp; ringCache = null }
+      g.setTransform(dp, 0, 0, dp, 0, 0)
+      g.clearRect(0, 0, innerWidth, innerHeight)
+      gU.uTime.value = performance.now() / 1000
+      finish.uniforms.uT.value = (performance.now() % 10000) / 10000 * 6.28
+      // demo/recording clock: advance without an audio device (headless has none)
+      if (window.__demoPlay) {
+        const now = performance.now()
+        window.__demoLast = window.__demoLast || now
+        const ddt = Math.min((now - window.__demoLast) / 1000, 0.05); window.__demoLast = now
+        curFrac = (curFrac + ddt / (mode === 'cat' ? 40 : 18)) % 1
+      }
+      const intTarget = (interior && mode === 'wave') ? 1 : 0
+      gU.uInterior.value += (intTarget - gU.uInterior.value) * 0.08
+      rayGroup.visible = gU.uInterior.value > 0.02
+      const cx = innerWidth / 2, cy = innerHeight * 0.42
+      const R = Math.min(innerWidth, innerHeight) * T.ringR, A = Math.min(innerWidth, innerHeight) * T.ringAmp
+
+      if (mode === 'wave' && ev) {
+        const sps = ev.meta.sps, recordS = ev.v.length / sps, durS = recordS / speed
+        if (playing && actx && !window.__demoPlay) curFrac = (startFrac + (actx.currentTime - startCtxT) / durS) % 1
+        const env = ev.env, N = env.length
+        const envNow = env[Math.min(Math.floor(curFrac * N), N - 1)] / 32767
+        const rb = Math.min(rmsOf(anaBody) * 6, 1), rs = Math.min(rmsOf(anaSurf) * 5, 1)
+        const ampB = Math.max(rb, envNow * 0.8), ampS = Math.max(rs, envNow * 0.8)
+        gU.uGT.value = curFrac * recordS
+        gU.uAmpBody.value = ampB; gU.uAmpSurf.value = ampS
+        gU.uBreath.value = T.breath * ampS * THREE.MathUtils.smoothstep(curFrac * recordS * T.vR / 6371, 2.5, 5)
+        staDot.scale.setScalar(0.06 + Math.max(ampB, ampS) * 0.13)
+        epiDot.scale.setScalar(0.07 + 0.02 * Math.sin(performance.now() / 300))
+
+        // record ring
+        g.globalCompositeOperation = 'lighter'
+        g.lineWidth = 1.3
+        const played = Math.floor(curFrac * N)
+        for (const [from, to, alpha] of [[0, played, 0.8], [played, N, 0.22]]) {
+          if (to <= from) continue
+          g.strokeStyle = T.ink; g.globalAlpha = alpha
+          g.beginPath()
+          for (let i = from; i <= to && i < N; i++) {
+            const a = (i / N) * Math.PI * 2 - Math.PI / 2
+            const r = R + (env[i] / 32767) * A
+            i === from ? g.moveTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r) : g.lineTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r)
+          }
+          g.stroke()
+        }
+        g.globalAlpha = 1
+        g.font = '10px ui-monospace,Menlo,monospace'
+        for (const [nm, vv, col] of [['P', T.vP, 'rgba(171,139,255,.9)'], ['S', T.vS, 'rgba(159,200,255,.9)'], ['R', T.vR, 'rgba(255,237,173,.9)']]) {
+          const f = (ev.meta.distKm / vv) / recordS
+          if (f > 1) continue
+          const a = f * Math.PI * 2 - Math.PI / 2
+          g.strokeStyle = col; g.fillStyle = col
+          g.beginPath()
+          g.moveTo(cx + Math.cos(a) * (R - 14), cy + Math.sin(a) * (R - 14))
+          g.lineTo(cx + Math.cos(a) * (R - 4), cy + Math.sin(a) * (R - 4))
+          g.stroke()
+          g.fillText(nm, cx + Math.cos(a) * (R - 26) - 3, cy + Math.sin(a) * (R - 26) + 3)
+        }
+        const pa = curFrac * Math.PI * 2 - Math.PI / 2
+        const amp = Math.max(ampB, ampS)
+        const pr2 = R + (env[Math.min(played, N - 1)] / 32767) * A
+        const px = cx + Math.cos(pa) * pr2, py = cy + Math.sin(pa) * pr2
+        const pg = g.createRadialGradient(px, py, 0, px, py, 20 + amp * 50)
+        pg.addColorStop(0, `rgba(255,237,173,${0.6 + amp * 0.4})`); pg.addColorStop(1, 'rgba(255,237,173,0)')
+        g.fillStyle = pg; g.beginPath(); g.arc(px, py, 20 + amp * 50, 0, Math.PI * 2); g.fill()
+        g.globalCompositeOperation = 'source-over'
+
+        const utc = new Date(new Date(ev.meta.origin + 'Z').getTime() + curFrac * recordS * 1000)
+        read.innerHTML =
+          `<div>${ev.meta.name} <b>M ${ev.meta.mag.toFixed(1)}</b> · <b>${ev.meta.depth} KM</b> DEEP</div>` +
+          `<div>EPICENTER → STATION <b>${ev.meta.distDeg}°</b> · <b>${ev.meta.distKm.toLocaleString()} KM</b></div>` +
+          `<div>SPEED <b>${speed}×</b> · MIX <b>${fmode.toUpperCase()}</b></div>` +
+          `<div>RECORD <b>${(recordS / 3600).toFixed(1)} H</b> → <b>${durS.toFixed(0)} S</b> · LOOPING</div>`
+        bigm.firstChild.textContent = utc.toISOString().slice(11, 19) + ' '
+        window.__probe = { id: ev.meta.name, frac: curFrac, ampB, ampS, playing }
+      }
+
+      if (mode === 'cat') {
+        const cat = cache.catalog, t0 = cat.e[0][0], span = cat.e.at(-1)[0] - t0
+        if (playing && actx && !window.__demoPlay) {
+          curFrac = startFrac + (actx.currentTime - startCtxT) / T.catDur
+          if (curFrac >= 1) buildCatAudio(0)          // loop the year
+        }
+        const nowS = curFrac * T.catDur
+        const rm = Math.min(rmsOf(anaMaster) * 5, 1)
+        // flashes + biggest recent for ripple
+        let fi = 0, count = 0, big = null
+        for (const [t, lat, lon, dep, mag] of cat.e) {
+          const off = ((t - t0) / span) * T.catDur
+          if (off <= nowS) count++
+          const age = nowS - off
+          const life = 1.5 + (mag - 5.5) * 0.8
+          if (age >= 0 && age < life && fi < FLASHES) {
+            const s = flashPool[fi++]
+            s.visible = true
+            s.position.copy(ll2v(lat, lon, 1.012))
+            const k = 1 - age / life
+            s.material.opacity = Math.min(k * k * 1.6, 1)
+            s.scale.setScalar(0.02 + Math.pow(mag - 5.3, 1.8) * 0.03 * (0.6 + 0.4 * k))
+            s.material.color = cShallow.clone().lerp(cDeep, Math.min(dep / 600, 1))
+            if (mag >= 7.2 && (!big || off > big.off)) big = { lat, lon, off, age }
+          }
+        }
+        for (; fi < FLASHES; fi++) flashPool[fi].visible = false
+        if (big) {
+          gU.uEpi.value.copy(ll2v(big.lat, big.lon))
+          gU.uGT.value = big.age * 400            // choreographic sweep for the giants
+          gU.uAmpBody.value = rm; gU.uAmpSurf.value = rm
+        } else gU.uGT.value = -1
+        gU.uBreath.value = 0
+
+        if (!ringCache) ringCache = buildCatRing(cx, cy, R)
+        g.drawImage(ringCache, 0, 0, innerWidth, innerHeight)
+        const pa = curFrac * Math.PI * 2 - Math.PI / 2
+        const px = cx + Math.cos(pa) * R, py = cy + Math.sin(pa) * R
+        const pg = g.createRadialGradient(px, py, 0, px, py, 18 + rm * 40)
+        pg.addColorStop(0, `rgba(255,237,173,${0.5 + rm * 0.5})`); pg.addColorStop(1, 'rgba(255,237,173,0)')
+        g.globalCompositeOperation = 'lighter'
+        g.fillStyle = pg; g.beginPath(); g.arc(px, py, 18 + rm * 40, 0, Math.PI * 2); g.fill()
+        g.globalCompositeOperation = 'source-over'
+
+        const dt = new Date((t0 + curFrac * span) * 1000)
+        read.innerHTML =
+          `<div>THE CATALOG · <b>M ≥ ${cat.meta.minmag}</b> · GLOBAL</div>` +
+          `<div>EVENTS SO FAR <b>${count}</b> / ${cat.meta.count}</div>` +
+          `<div>PITCH = MAGNITUDE · MUFFLE = DEPTH</div>` +
+          `<div>EVERY HIT IS THE REAL BOLIVIA WAVEFORM</div>`
+        bigm.firstChild.textContent = dt.toISOString().slice(0, 10).replaceAll('-', '.') + ' '
+        window.__probe = { id: 'catalog', frac: curFrac, count, playing }
+      }
+
+      controls.update()
+      composer.render()
+      requestAnimationFrame(draw)
+    }
+
+    addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix()
+      renderer.setSize(innerWidth, innerHeight); composer.setSize(innerWidth, innerHeight)
+      ringCache = null
+    })
+
+    await loadAll()
+    window.selectEvent = select
+    window.selectCatalog = selectCatalog
+    window.setFracOnly = f => { curFrac = f; playing = false }
+    window.__cache = cache
+    window.__ready = true
+    // arrive alive (Lior 2026-07-19): Tōhoku starts sweeping silently on load — browsers
+    // won't run audio before a gesture, so the silent demo clock drives the visuals and the
+    // first click anywhere hands off to the real seismogram at the same position.
+    if (!new URLSearchParams(location.search).has('bare')) {
+      select('tohoku')
+      window.__demoPlay = true; window.__autoSilent = true
+      document.getElementById('hint').textContent = 'SOUND STARTS ON YOUR FIRST CLICK'
+      addEventListener('pointerdown', () => {
+        if (!window.__autoSilent) return
+        window.__autoSilent = false; window.__demoPlay = false
+        document.getElementById('hint').textContent = 'CLICK AN EVENT · DRAG THE EARTH · CLICK THE RING TO SCRUB'
+        if (actx?.state === 'suspended') actx.resume()
+        buildWaveAudio(curFrac)
+      }, { capture: true })
+    }
+    draw()
+  </script>
+  <script>if(new URLSearchParams(location.search).has('bare')){const u=document.getElementById('ui');if(u)u.style.display='none';const c=document.getElementById('cv');/*keep seismic ring*/}</script>
+</body>
+</html>

@@ -1,0 +1,615 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>THE SHIELD — solar wind vs. magnetosphere</title>
+  <style>
+    html,body{margin:0;height:100%;background:#020308;overflow:hidden}
+    canvas{display:block}
+    #ui{position:fixed;inset:0;pointer-events:none;font:12px ui-monospace,"SF Mono",Menlo,monospace;color:#9aa3b5}
+    #title{display:none;position:absolute;top:26px;left:28px;letter-spacing:.06em}  /* Lior 2026-07-18: too busy; facts live in the trilogy specs */
+    #title h1{margin:0;font-size:13px;font-weight:600;color:#e8ebf2;letter-spacing:.22em}
+    #title p{margin:6px 0 0;font-size:10.5px;color:#5c6577;letter-spacing:.14em;line-height:1.7}
+    #read{position:absolute;top:26px;right:28px;text-align:right;letter-spacing:.1em;line-height:1.9;font-size:11px}
+    #read b{color:#e8ebf2;font-weight:600}
+    #read .bz-n b{color:#7fb8ff}
+    #read .bz-s b{color:#ff5f7a}
+    #bigbz{position:absolute;left:28px;bottom:118px;font-size:38px;font-weight:200;color:#7fb8ff;letter-spacing:.04em;transition:color .5s}
+    #bigbz.south{color:#ff5f7a}
+    #bigbz small{font-size:11px;color:#5c6577;letter-spacing:.2em;display:block;margin-top:2px}
+    #tl{position:absolute;left:0;right:0;bottom:0;height:96px;pointer-events:auto;cursor:crosshair}
+    #ctl{position:absolute;left:28px;bottom:16px;pointer-events:auto;display:flex;flex-direction:column;gap:5px;width:158px;z-index:2}
+    #ctl button{background:none;border:1px solid #2a3040;color:#9aa3b5;font:10px ui-monospace,Menlo,monospace;
+      letter-spacing:.1em;padding:3px 8px;cursor:pointer;border-radius:2px}
+    #ctl button:hover{border-color:#5c6577;color:#e8ebf2}
+    #ctl button.on{border-color:#7fb8ff;color:#cfe4ff}
+    #ctl .row{display:flex;gap:5px;align-items:center}
+    #ctl .row button{flex:1;padding:3px 0}
+    #ctl .lbl{color:#5c6577;font:9px ui-monospace,Menlo,monospace;letter-spacing:.14em}
+    #hint{position:absolute;bottom:118px;right:28px;font-size:10px;color:#3d4454;letter-spacing:.16em}
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <div id="title">
+      <h1>SPACE WEATHER</h1>
+      <p>SOLAR WIND vs. EARTH'S MAGNETOSPHERE<br>
+      NOAA SWPC · SWFO-L1 AT L1 · 1-MIN CADENCE<br>
+      <span id="span"></span></p>
+    </div>
+    <div id="read"></div>
+    <div id="bigbz">— <small>BZ · SOLAR STORM DIRECTION, NT</small></div>
+    <div id="hint">DRAG TO ORBIT · CLICK TIMELINE TO SCRUB</div>
+    <canvas id="tl"></canvas>
+    <div id="ctl">
+      <button id="play" class="on">PAUSE</button>
+      <div class="row">
+        <span class="lbl">SPEED</span>
+        <button data-r="12">1×</button>
+        <button data-r="60" class="on">5×</button>
+        <button data-r="240">20×</button>
+      </div>
+      <button id="resetview">RESET VIEW</button>
+    </div>
+  </div>
+
+  <script type="importmap">
+  { "imports": {
+    "three": "https://unpkg.com/three@0.171.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.171.0/examples/jsm/"
+  } }
+  </script>
+  <script type="module">
+    import * as THREE from 'three'
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+    import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
+    import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
+    import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
+    import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js'
+    import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
+
+    // ---------------- TASTE ----------------
+    const T = {
+      windColor:     new THREE.Color('#93a6bf'),   // ambient solar wind streaks — thin silver, like the hero weave
+      windHot:       new THREE.Color('#d5e2f0'),   // fast-wind tint
+      injectColor:   new THREE.Color('#e8577c'),   // reconnection / injected particles — dusty rose like the hero encode, not neon
+      auroraColor:   new THREE.Color('#3cf2a4'),   // curtain body — auroral green
+      auroraStorm:   new THREE.Color('#ff5f9e'),   // crown fringe — the pink of real storms
+      auroraViolet:  new THREE.Color('#6b4de0'),   // lower-border violet
+      lineColor:     new THREE.Color('#2c4a72'),   // field lines
+      lineHot:       new THREE.Color('#a63b55'),   // dayside lines when Bz south
+      earthColor:    '#070a12',
+      rimColor:      new THREE.Color('#4a6f9e'),
+      windOpacity:   0.30,      // dimmed toward the hero-reel grade Lior prefers
+      lineOpacity:   0.22,
+      streakLen:     0.11,      // seconds of velocity shown as streak
+      bloom:         { strength: 0.65, radius: 0.4, threshold: 0.42 },
+      tlLeft:        265,       // timeline graph starts here so it never underlaps the stacked controls
+      stars:         { n: 4200, color: '#4a5570', size: 0.24, opacity: 0.65 },   // faint space backdrop, reads mostly in the vignette dark
+      renderScale:   1,         // device pixels per CSS px. 1 = soft filmic strokes like the hero reel (retina upscales); 2 = crisp hairlines
+      grain:         0.02,      // film grain amplitude — the grainy quality of the hero reel (0.035 reads as dirt)
+      filmDesat:     0.18,      // global desaturation in the finish pass — emulates the reel encode's mellowing (0 = off)
+      compress:      0.62,      // visual radial compression exponent (Re -> scene units)
+      nParticles:    42000,     // denser field — the hero reel's downscale packs ~2 streaks per pixel
+    }
+    // ---------------------------------------
+
+    const vis = r => Math.pow(Math.max(r, 0.001), T.compress)   // Re -> scene radius
+
+    // --- renderer / scene ---
+    const renderer = new THREE.WebGLRenderer({ antialias: true })
+    renderer.setPixelRatio(T.renderScale)
+    renderer.setSize(innerWidth, innerHeight)
+    document.body.appendChild(renderer.domElement)
+    const scene = new THREE.Scene()
+    scene.background = new THREE.Color('#020308')
+    const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 300)
+    camera.position.set(4.6, 2.6, 8.4)
+    const controls = new OrbitControls(camera, renderer.domElement)
+    controls.enableDamping = true; controls.dampingFactor = 0.06
+    controls.minDistance = 3; controls.maxDistance = 40
+    controls.target.set(-0.8, 0, 0)
+
+    // faint stars — same recipe as the seismic piece, dimmer; below bloom threshold so they never glow
+    {
+      const n = T.stars.n, p = new Float32Array(n * 3)
+      for (let i = 0; i < n; i++) {
+        const v = new THREE.Vector3().randomDirection().multiplyScalar(60)
+        p.set([v.x, v.y, v.z], i * 3)
+      }
+      const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(p, 3))
+      scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: T.stars.color, size: T.stars.size, transparent: true, opacity: T.stars.opacity })))
+    }
+
+    const composer = new EffectComposer(renderer)
+    composer.addPass(new RenderPass(scene, camera))
+    const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight),
+      T.bloom.strength, T.bloom.radius, T.bloom.threshold)
+    composer.addPass(bloom)
+    // finishing: whisper of grain + vignette fade into the black
+    const finish = new ShaderPass({
+      uniforms: { tDiffuse: { value: null }, uT: { value: 0 }, uGrain: { value: T.grain }, uDesat: { value: T.filmDesat } },
+      vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.); }`,
+      fragmentShader: `
+        uniform sampler2D tDiffuse; uniform float uT; uniform float uGrain; uniform float uDesat; varying vec2 vUv;
+        float h(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7)) + uT) * 43758.5453); }
+        void main(){
+          vec4 c = texture2D(tDiffuse, vUv);
+          c.rgb = mix(c.rgb, vec3(dot(c.rgb, vec3(.299, .587, .114))), uDesat);
+          float d = distance(vUv, vec2(.5));
+          c.rgb *= 1. - 0.32 * smoothstep(.40, .95, d);
+          c.rgb += (h(vUv * 917.) - .5) * uGrain;
+          gl_FragColor = c;
+        }`,
+    })
+    composer.addPass(finish)
+    composer.addPass(new OutputPass())
+
+    // --- earth ---
+    scene.add(new THREE.AmbientLight('#223', 0.5))
+    const sun = new THREE.DirectionalLight('#cfd8ff', 1.6); sun.position.set(30, 4, 8); scene.add(sun)
+    const earth = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 64, 64),
+      new THREE.MeshStandardMaterial({ color: T.earthColor, roughness: 0.9, metalness: 0.1 }))
+    scene.add(earth)
+    // fresnel rim
+    const rim = new THREE.Mesh(new THREE.SphereGeometry(1.015, 64, 64), new THREE.ShaderMaterial({
+      transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.FrontSide,
+      uniforms: { c: { value: T.rimColor } },
+      vertexShader: `varying vec3 vN,vV; void main(){ vN=normalize(normalMatrix*normal);
+        vec4 mv=modelViewMatrix*vec4(position,1.); vV=normalize(-mv.xyz); gl_Position=projectionMatrix*mv; }`,
+      fragmentShader: `uniform vec3 c; varying vec3 vN,vV;
+        void main(){ float f=pow(1.-abs(dot(vN,vV)),3.5); gl_FragColor=vec4(c*f*0.9,f*0.9); }`,
+    }))
+    scene.add(rim)
+
+    // silvery continents — the dark planet carries its land as faint light
+    const ll2v = (lat, lon, r = 1) => {
+      const la = lat * Math.PI / 180, lo = lon * Math.PI / 180
+      return new THREE.Vector3(r * Math.cos(la) * Math.cos(lo), r * Math.sin(la), -r * Math.cos(la) * Math.sin(lo))
+    }
+    {
+      const dots = await (await fetch('landdots.json')).json()
+      const n = dots.length / 2, pos = new Float32Array(n * 3)
+      for (let i = 0; i < n; i++) {
+        const v = ll2v(dots[i * 2 + 1], dots[i * 2], 1.008)
+        pos[i * 3] = v.x; pos[i * 3 + 1] = v.y; pos[i * 3 + 2] = v.z
+      }
+      const dg = new THREE.BufferGeometry()
+      dg.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+      scene.add(new THREE.Points(dg, new THREE.PointsMaterial({
+        color: '#c9d2e2', size: 0.016, sizeAttenuation: true,
+        transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false })))
+      const coastL = await (await fetch('coast.json')).json()
+      const pts = []
+      for (const line of coastL) for (let i = 0; i + 3 < line.length; i += 2)
+        pts.push(ll2v(line[i + 1], line[i], 1.006), ll2v(line[i + 3], line[i + 2], 1.006))
+      const cg = new THREE.BufferGeometry().setFromPoints(pts)
+      scene.add(new THREE.LineSegments(cg, new THREE.LineBasicMaterial({
+        color: '#8a96ac', transparent: true, opacity: 0.2, blending: THREE.AdditiveBlending, depthWrite: false })))
+    }
+
+    // --- aurora shell ---
+    const auroraU = {
+      oval: { value: 0.32 },        // colatitude of oval, rad
+      glow: { value: 0.0 },         // intensity 0..1
+      mixc: { value: 0.0 },         // green->storm colour
+      time: { value: 0 },
+      cA: { value: T.auroraColor }, cB: { value: T.auroraStorm }, cV: { value: T.auroraViolet },
+    }
+    const aurora = new THREE.Mesh(new THREE.SphereGeometry(1.03, 96, 96), new THREE.ShaderMaterial({
+      transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+      uniforms: auroraU,
+      vertexShader: `varying vec3 vP; void main(){ vP=normalize(position);
+        gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.); }`,
+      fragmentShader: `
+        uniform float oval,glow,time,mixc; uniform vec3 cA,cB,cV; varying vec3 vP;
+        float h(float n){ return fract(sin(n)*43758.5453); }
+        float noise(float x){ float i=floor(x),f=fract(x); return mix(h(i),h(i+1.),f*f*(3.-2.*f)); }
+        void main(){
+          float colat = acos(abs(vP.z));                       // 0 at poles (z is spin axis)
+          float lon = atan(vP.y, vP.x);
+          float hemi = step(0., vP.z) * 7.3;
+          float w = 0.07 + 0.11*glow;                          // wide, storm-swollen band
+          float d = (colat - oval)/w;
+          // sharp poleward edge (dark polar cap), long equatorward drape
+          float ring = d < 0. ? exp(-d*d*3.2) : exp(-d*d*0.85) + 0.4*exp(-(d-1.7)*(d-1.7)*0.55);
+          // real aurora: slow curtains folded, with dense dancing rays across four scales
+          float curt = 0.5 + 0.5*noise(lon*6.0 + time*0.6 + hemi);
+          float ray  = pow(0.5 + 0.5*noise(lon*23.0 + time*1.4 + hemi), 2.2);
+          float ray2 = pow(0.5 + 0.5*noise(lon*47.0 - time*1.0 + hemi), 3.0);
+          float ray3 = pow(0.5 + 0.5*noise(lon*97.0 + time*2.1 + hemi), 4.0);
+          float rays = 0.18 + 0.5*ray + 0.35*ray2 + 0.30*ray3;   // ray-dominated so structure shows
+          float a = ring * curt * rays * (0.3 + 0.7*glow);
+          // colour anatomy: green body, pink crown on fringe + ray tips, violet lower border
+          vec3 col = cA;
+          float crown = clamp(d*0.6 + 0.25 + (ray - 0.35)*0.6, 0., 1.) * (0.4 + 0.6*mixc);
+          col = mix(col, cB, crown);
+          col = mix(col, cV, clamp(-d*0.5 - 0.1, 0., 1.) * 0.6);
+          gl_FragColor = vec4(col*a*1.5, min(a, 0.9));
+        }`,
+    }))
+    aurora.rotation.x = Math.PI / 2   // spin axis -> world Y, poles up/down
+    scene.add(aurora)
+    // one taller shell — curtain height and limb parallax, without stacking to white
+    { const sh = new THREE.Mesh(aurora.geometry, aurora.material)
+      sh.rotation.x = Math.PI / 2; sh.scale.setScalar(1.06); scene.add(sh) }
+    // NOTE: shader uses vP.z as spin axis; mesh rotated so spin axis = world Y
+
+    // --- sun glow (off-screen source, +X) ---
+    const glowTex = (() => {
+      const c = document.createElement('canvas'); c.width = c.height = 256
+      const g = c.getContext('2d'), gr = g.createRadialGradient(128, 128, 0, 128, 128, 128)
+      gr.addColorStop(0, 'rgba(255,236,200,.9)'); gr.addColorStop(0.35, 'rgba(255,190,120,.25)'); gr.addColorStop(1, 'rgba(255,190,120,0)')
+      g.fillStyle = gr; g.fillRect(0, 0, 256, 256)
+      return new THREE.CanvasTexture(c)
+    })()
+    const sunGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.8 }))
+    sunGlow.position.set(17, 0, 0); sunGlow.scale.setScalar(7)
+    scene.add(sunGlow)
+
+    // --- stars ---
+    {
+      const n = 900, p = new Float32Array(n * 3)
+      for (let i = 0; i < n; i++) {
+        const v = new THREE.Vector3().randomDirection().multiplyScalar(120)
+        p.set([v.x, v.y, v.z], i * 3)
+      }
+      const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(p, 3))
+      scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: '#3a4258', size: 0.14, sizeAttenuation: true, transparent: true, opacity: 0.7 })))
+    }
+
+    // --- Shue (1998) magnetopause ---
+    function shue(bz, n, v) {
+      const dp = Math.max(2e-6 * n * v * v, 0.2)               // dynamic pressure, nPa
+      const r0 = (10.22 + 1.29 * Math.tanh(0.184 * (bz + 8.14))) * Math.pow(dp, -1 / 6.6)
+      const a = (0.58 - 0.007 * bz) * (1 + 0.024 * Math.log(dp))
+      return { r0, a }
+    }
+    const mpRadius = (th, s) => s.r0 * Math.pow(2 / (1 + Math.cos(Math.min(th, 2.58))), s.a)
+
+    // cylindrical boundary table: max visual rho of the Shue surface per visual-x bin.
+    // gives flow-around + an empty tail cavity without per-particle surface solves.
+    const XMIN = -26, XMAX = 16, NTAB = 96
+    const rhoTab = new Float32Array(NTAB)
+    function buildRhoTab(s) {
+      rhoTab.fill(0)
+      for (let i = 0; i <= 400; i++) {
+        const th = (i / 400) * 2.58
+        const rv = vis(mpRadius(th, s))
+        const b = Math.round(((rv * Math.cos(th)) - XMIN) / (XMAX - XMIN) * (NTAB - 1))
+        if (b >= 0 && b < NTAB) rhoTab[b] = Math.max(rhoTab[b], rv * Math.sin(th))
+      }
+      for (let k = 0; k < 2; k++)
+        for (let b = 1; b < NTAB - 1; b++) rhoTab[b] = Math.max(rhoTab[b], (rhoTab[b - 1] + rhoTab[b + 1]) / 2)
+    }
+    function rhoAt(xv) {
+      const f = THREE.MathUtils.clamp((xv - XMIN) / (XMAX - XMIN) * (NTAB - 1), 0, NTAB - 1.001)
+      const b = Math.floor(f)
+      return rhoTab[b] + (rhoTab[b + 1] - rhoTab[b]) * (f - b)
+    }
+
+    // --- dipole field lines (rebuilt when state changes) ---
+    const L_SHELLS = [2.6, 3.8, 5.4, 7.6]
+    const N_LON = 12, N_PTS = 72
+    const lineSegs = L_SHELLS.length * N_LON * (N_PTS - 1)
+    const linePos = new Float32Array(lineSegs * 2 * 3)
+    const lineCol = new Float32Array(lineSegs * 2 * 3)
+    const lineGeo = new THREE.BufferGeometry()
+    lineGeo.setAttribute('position', new THREE.BufferAttribute(linePos, 3))
+    lineGeo.setAttribute('color', new THREE.BufferAttribute(lineCol, 3))
+    const lines = new THREE.LineSegments(lineGeo, new THREE.LineBasicMaterial({
+      vertexColors: true, transparent: true, opacity: T.lineOpacity, blending: THREE.AdditiveBlending, depthWrite: false }))
+    scene.add(lines)
+
+    const _p = new THREE.Vector3(), _c = new THREE.Color()
+    function buildLines(s, southness) {
+      let k = 0, ci = 0
+      const comp = 0.55 + 0.42 * (s.r0 / 10.5)                 // dayside compression follows standoff
+      for (const L of L_SHELLS) for (let j = 0; j < N_LON; j++) {
+        const lon = (j / N_LON) * Math.PI * 2 + (L * 0.3)
+        const lamMax = Math.acos(Math.sqrt(1 / L)) * 0.985
+        let px, py, pz, first = true
+        for (let i = 0; i < N_PTS; i++) {
+          const lam = -lamMax + (2 * lamMax * i) / (N_PTS - 1)
+          const r = L * Math.cos(lam) ** 2
+          let x = r * Math.cos(lam) * Math.cos(lon)
+          const zz = r * Math.sin(lam)
+          let y = r * Math.cos(lam) * Math.sin(lon)
+          // day/night distortion
+          if (x > 0) x *= comp
+          else x *= 1 + 1.35 * Math.min(1, -x / 9)
+          // to visual space (compressed radius), spin axis = world Y
+          _p.set(x, zz, y)
+          const rr = _p.length()
+          _p.multiplyScalar(vis(rr) / rr)
+          if (!first) {
+            linePos.set([px, py, pz, _p.x, _p.y, _p.z], k); k += 6
+            // colour: dayside noses blush when Bz south
+            const dayness = THREE.MathUtils.smoothstep((x / Math.max(r, .01)) * 0.5 + 0.5, 0.45, 1)
+            _c.copy(T.lineColor).lerp(T.lineHot, dayness * southness * 0.7)
+            lineCol.set([_c.r, _c.g, _c.b, _c.r, _c.g, _c.b], ci); ci += 6
+          }
+          px = _p.x; py = _p.y; pz = _p.z; first = false
+        }
+      }
+      lineGeo.attributes.position.needsUpdate = true
+      lineGeo.attributes.color.needsUpdate = true
+    }
+
+    // --- particles (solar wind + injected), rendered as velocity streaks ---
+    const N = T.nParticles
+    const P = {
+      pos: new Float32Array(N * 3), vel: new Float32Array(N * 3),
+      state: new Uint8Array(N),      // 0 wind, 1 injected
+      phase: new Float32Array(N),
+    }
+    const segPos = new Float32Array(N * 6), segCol = new Float32Array(N * 6)
+    const segGeo = new THREE.BufferGeometry()
+    segGeo.setAttribute('position', new THREE.BufferAttribute(segPos, 3))
+    segGeo.setAttribute('color', new THREE.BufferAttribute(segCol, 3))
+    const cloud = new THREE.LineSegments(segGeo, new THREE.LineBasicMaterial({
+      vertexColors: true, transparent: true, opacity: T.windOpacity, blending: THREE.AdditiveBlending, depthWrite: false }))
+    scene.add(cloud)
+
+    const SPAWN_X = 16, TAIL_END = -26, BOUND = 12
+    function respawn(i, randX) {
+      const a = Math.random() * Math.PI * 2
+      // concentrate flow on the shield: 78% inside impact parameter ~5.2, 22% ambient context
+      const rr = Math.random() < 0.78 ? Math.sqrt(Math.random()) * 5.2 : 5.2 + Math.random() * 4
+      P.pos[i * 3] = randX ? SPAWN_X * (0.2 + Math.random() * 0.8) : SPAWN_X
+      P.pos[i * 3 + 1] = Math.cos(a) * rr
+      P.pos[i * 3 + 2] = Math.sin(a) * rr
+      P.state[i] = 0
+      P.phase[i] = Math.random() * Math.PI * 2
+    }
+    for (let i = 0; i < N; i++) respawn(i, true)
+
+    // --- data ---
+    const data = await (await fetch('solarwind.json')).json()
+    // forward-fill nulls
+    {
+      let last = [0, 400, 4, 0, 5]
+      for (const r of data.sw) for (let c = 1; c < 5; c++) { if (r[c] == null) r[c] = last[c]; else last[c] = r[c] }
+    }
+    const t0 = data.sw[0][0], t1 = data.sw.at(-1)[0]
+    document.getElementById('span').textContent =
+      data.meta.start.slice(0, 10).replaceAll('-', '.') + ' — ' + data.meta.end.slice(0, 10).replaceAll('-', '.') + ' UTC · ARCHIVED ' + data.meta.fetched.slice(0, 10)
+
+    function sample(t) {
+      // binary search
+      const a = data.sw
+      let lo = 0, hi = a.length - 1
+      while (hi - lo > 1) { const m = (lo + hi) >> 1; (a[m][0] <= t) ? lo = m : hi = m }
+      const u = THREE.MathUtils.clamp((t - a[lo][0]) / Math.max(a[hi][0] - a[lo][0], 1), 0, 1)
+      const g = c => a[lo][c] + (a[hi][c] - a[lo][c]) * u
+      let kp = 0
+      for (const r of data.kp) if (r[0] <= t) kp = r[1]
+      return { v: g(1), n: g(2), bz: g(3), bt: g(4), kp }
+    }
+
+    // --- timeline ---
+    const tl = document.getElementById('tl'), tg = tl.getContext('2d')
+    let tlCache = null
+    function buildTimelineCache() {
+      const W = tl.width = innerWidth * devicePixelRatio, H = tl.height = 96 * devicePixelRatio
+      tl.style.width = innerWidth + 'px'
+      const a = data.sw, m = 10 * devicePixelRatio
+      const ML = T.tlLeft * devicePixelRatio, MR = 14 * devicePixelRatio   // left zone belongs to the controls
+      const c = document.createElement('canvas'); c.width = W; c.height = H
+      const g = c.getContext('2d')
+      g.fillStyle = 'rgba(2,3,8,.72)'; g.fillRect(0, 0, W, H)
+      const X = t => ML + ((t - t0) / (t1 - t0)) * (W - ML - MR)
+      const mid = H * 0.52, bzScale = H * 0.30 / 12
+      // bz filled
+      for (let i = 0; i < a.length; i += 2) {
+        const x = X(a[i][0]), bz = a[i][3]
+        g.fillStyle = bz < 0 ? 'rgba(255,95,122,.55)' : 'rgba(127,184,255,.35)'
+        g.fillRect(x, Math.min(mid, mid - bz * bzScale), 1, Math.abs(bz * bzScale) + 0.5)
+      }
+      // speed line
+      g.strokeStyle = 'rgba(232,235,242,.5)'; g.lineWidth = devicePixelRatio; g.beginPath()
+      for (let i = 0; i < a.length; i += 4) {
+        const x = X(a[i][0]), y = H - m - ((a[i][1] - 250) / 500) * (H - 2 * m) * 0.6
+        i ? g.lineTo(x, y) : g.moveTo(x, y)
+      }
+      g.stroke()
+      // day ticks
+      g.fillStyle = 'rgba(92,101,119,.9)'; g.font = `${9 * devicePixelRatio}px ui-monospace,Menlo,monospace`
+      for (let d = Math.ceil(t0 / 86400) * 86400; d < t1; d += 86400) {
+        const x = X(d); g.fillRect(x, 0, 1, H)
+        g.fillText(new Date(d * 1000).toISOString().slice(5, 10).replace('-', '.'), x + 4 * devicePixelRatio, 11 * devicePixelRatio)
+      }
+      // bz legend, quiet axis markings, right-aligned against the graph edge (Lior 2026-07-18)
+      g.font = `${8.5 * devicePixelRatio}px ui-monospace,Menlo,monospace`
+      g.textAlign = 'right'
+      g.fillStyle = 'rgba(127,184,255,.8)'
+      g.fillText('C A L M', ML - 10 * devicePixelRatio, mid - 6 * devicePixelRatio)
+      g.fillStyle = 'rgba(255,95,122,.85)'
+      g.fillText('D A N G E R', ML - 10 * devicePixelRatio, mid + 13 * devicePixelRatio)
+      g.textAlign = 'start'
+      tlCache = c
+    }
+    function drawTimeline(frac) {
+      if (!tlCache) buildTimelineCache()
+      const W = tl.width, H = tl.height
+      tg.clearRect(0, 0, W, H)
+      tg.drawImage(tlCache, 0, 0)
+      const ML = T.tlLeft * devicePixelRatio, MR = 14 * devicePixelRatio
+      tg.fillStyle = '#e8ebf2'; tg.fillRect(ML + frac * (W - ML - MR) - 1, 0, 2, H)
+    }
+    let scrubbing = false
+    const setFromEvent = e => { simT = t0 + THREE.MathUtils.clamp((e.clientX - T.tlLeft) / (innerWidth - T.tlLeft - 14), 0, 1) * (t1 - t0) }
+    tl.addEventListener('pointerdown', e => { scrubbing = true; setFromEvent(e) })
+    addEventListener('pointermove', e => scrubbing && setFromEvent(e))
+    addEventListener('pointerup', () => scrubbing = false)
+
+    // --- controls ---
+    let playing = true, rate = 60   // sim-minutes per real-second
+    const playBtn = document.getElementById('play')
+    playBtn.onclick = () => { playing = !playing; playBtn.textContent = playing ? 'PAUSE' : 'PLAY'; playBtn.classList.toggle('on', playing) }
+    document.querySelectorAll('#ctl [data-r]').forEach(b => b.onclick = () => {
+      rate = +b.dataset.r
+      document.querySelectorAll('#ctl [data-r]').forEach(x => x.classList.toggle('on', x === b))
+    })
+    // escape hatch when orbiting goes wild — restore the default camera
+    document.getElementById('resetview').onclick = () => {
+      camera.position.set(4.6, 2.6, 8.4)
+      controls.target.set(-0.8, 0, 0)
+      controls.update()
+    }
+
+    // --- readouts ---
+    const read = document.getElementById('read'), bigbz = document.getElementById('bigbz')
+    function updateHud(t, s) {
+      const iso = new Date(t * 1000).toISOString()
+      read.innerHTML =
+        `<div>${iso.slice(0, 10).replaceAll('-', '.')} <b>${iso.slice(11, 16)}</b> UT</div>` +
+        `<div>WIND <b>${s.v.toFixed(0)}</b> KM/S</div>` +
+        `<div>DENSITY <b>${s.n.toFixed(1)}</b> P/CM³</div>` +
+        `<div class="${s.bz < 0 ? 'bz-s' : 'bz-n'}">BZ <b>${s.bz >= 0 ? '+' : ''}${s.bz.toFixed(1)}</b> NT</div>` +
+        `<div>KP <b>${s.kp.toFixed(1)}</b> · GEOMAGNETIC STORM SCALE</div>` +
+        `<div>MAGNETOPAUSE <b>${shueState.r0.toFixed(1)}</b> RE</div>`
+      bigbz.firstChild.textContent = (s.bz >= 0 ? '+' : '−') + Math.abs(s.bz).toFixed(1) + ' '
+      bigbz.classList.toggle('south', s.bz < 0)
+    }
+
+    // --- sim loop ---
+    let simT = t0 + (86400 * 3.2)          // start July 8 — the Bz-south act
+    let shueState = shue(0, 5, 450)
+    let lastLineR0 = -1, lastLineSouth = -1
+    let auroraPow = 0, injectGlow = 0
+    const clock = new THREE.Clock()
+    const vv = new THREE.Vector3(), bb = new THREE.Vector3(), nrm = new THREE.Vector3()
+
+    function dipoleDir(x, y, z, out) {
+      // spin axis = Y; m·r̂ terms with m = ŷ
+      const r2 = x * x + y * y + z * z, r = Math.sqrt(r2)
+      const my = 1, dot = y / r
+      out.set(3 * dot * (x / r) - 0, 3 * dot * (y / r) - my, 3 * dot * (z / r) - 0)
+      return out.normalize()
+    }
+
+    function step(dt, s) {
+      const southness = THREE.MathUtils.smoothstep(-s.bz, 1, 7)
+      const windVis = 2.2 + (s.v - 300) / 110            // visual speed
+      const jitter = 0.12 + s.bt * 0.02
+      const activeFrac = THREE.MathUtils.clamp(0.5 + s.n / 18, 0, 1)
+      const injectP = southness * 2.0 * dt
+      let nInjected = 0
+      for (let i = 0; i < N; i++) if (P.state[i] === 1) nInjected++
+      const injectCap = N * activeFrac * 0.10   // injected stay a minority — accents, not the field
+      let deposits = 0
+      const w = T.windColor.clone().lerp(T.windHot, THREE.MathUtils.smoothstep(s.v, 380, 700))
+
+      for (let i = 0; i < N; i++) {
+        const i3 = i * 3
+        // density culls a fraction of particles to y=1e6 (hidden)
+        if (i > N * activeFrac) { segPos.set([0, 1e6, 0, 0, 1e6, 0], i * 6); continue }
+        let x = P.pos[i3], y = P.pos[i3 + 1], z = P.pos[i3 + 2]
+
+        let glow = 0.9    // baseline streak brightness (ambient wind is context, not story)
+        if (P.state[i] === 0) {
+          // solar wind: flow -x, pushed around the boundary cylinder profile
+          let vx = -windVis, vy = 0, vz = 0
+          const rho = Math.sqrt(y * y + z * z)
+          const rb = rhoAt(x)
+          const dd = rho - rb
+          if (rb > 0.05 && dd < 1.6) {
+            const push = THREE.MathUtils.clamp(1 - dd / 1.6, 0, 1)     // saturates inside
+            const inv = 1 / (rho + 1e-4)
+            const k = push * push * (dd < 0 ? 3.4 : 1.7)               // firm eviction when inside
+            vy += y * inv * k; vz += z * inv * k
+            glow = 0.9 + push * 1.1           // flow brightens where it presses on the shield
+            // reconnection injection near dayside boundary
+            if (s.bz < 0 && x > -1 && dd < 0.5 && nInjected < injectCap && Math.random() < injectP) {
+              P.state[i] = 1; nInjected++
+            }
+          }
+          P.phase[i] += dt * 3
+          x += (vx) * dt; y += (vy + Math.sin(P.phase[i]) * jitter) * dt; z += (vz + Math.cos(P.phase[i] * 0.9) * jitter) * dt
+          if (x < TAIL_END || Math.abs(y) > BOUND || Math.abs(z) > BOUND) { respawn(i); x = P.pos[i3]; y = P.pos[i3 + 1]; z = P.pos[i3 + 2] }
+          P.vel[i3] = vx; P.vel[i3 + 1] = vy; P.vel[i3 + 2] = vz
+        } else {
+          // injected: ride the field line INWARD to its polar footpoint (spin axis Y)
+          dipoleDir(x, y, z, bb)
+          const rr2 = x * x + y * y + z * z
+          if (bb.x * x + bb.y * y + bb.z * z > 0) bb.multiplyScalar(-1)   // pick the earthward branch
+          const sp = 4.2
+          P.phase[i] += dt * 14
+          // small gyration around field dir, tightening as the line converges
+          const gyro = Math.min(0.35, 0.08 * Math.sqrt(rr2))
+          vv.set(-bb.z, 0, bb.x).normalize().multiplyScalar(Math.sin(P.phase[i]) * gyro)
+          x += (bb.x * sp + vv.x) * dt; y += (bb.y * sp + vv.y) * dt; z += (bb.z * sp + vv.z) * dt
+          P.vel[i3] = bb.x * sp; P.vel[i3 + 1] = bb.y * sp; P.vel[i3 + 2] = bb.z * sp
+          const r = Math.sqrt(x * x + y * y + z * z)
+          if (r < 1.12) { deposits++; respawn(i); x = P.pos[i3]; y = P.pos[i3 + 1]; z = P.pos[i3 + 2]; P.state[i] = 0 }
+          if (r > 14) { respawn(i); P.state[i] = 0; x = P.pos[i3]; y = P.pos[i3 + 1]; z = P.pos[i3 + 2] }
+        }
+        P.pos[i3] = x; P.pos[i3 + 1] = y; P.pos[i3 + 2] = z
+
+        // depth cue: fade particles crossing near the camera
+        const dcx = x - camera.position.x, dcy = y - camera.position.y, dcz = z - camera.position.z
+        const dcam = Math.sqrt(dcx * dcx + dcy * dcy + dcz * dcz)
+        if (dcam < 6) glow *= Math.max(dcam / 6, 0.08)
+
+        // write streak (injected particles trail longer — auroral curtains, not dots)
+        const o = i * 6, L = P.state[i] === 1 ? T.streakLen * 1.9 : T.streakLen
+        segPos[o] = x; segPos[o + 1] = y; segPos[o + 2] = z
+        segPos[o + 3] = x - P.vel[i3] * L; segPos[o + 4] = y - P.vel[i3 + 1] * L; segPos[o + 5] = z - P.vel[i3 + 2] * L
+        let cr, cg, cb
+        if (P.state[i] === 1) { cr = T.injectColor.r * 1.5; cg = T.injectColor.g * 1.5; cb = T.injectColor.b * 1.5 }
+        else { cr = w.r * glow; cg = w.g * glow; cb = w.b * glow }
+        segCol[o] = cr; segCol[o + 1] = cg; segCol[o + 2] = cb
+        segCol[o + 3] = cr * 0.15; segCol[o + 4] = cg * 0.15; segCol[o + 5] = cb * 0.15
+      }
+      segGeo.attributes.position.needsUpdate = true
+      segGeo.attributes.color.needsUpdate = true
+
+      // aurora response
+      injectGlow += deposits * 0.004
+      injectGlow *= Math.exp(-dt * 0.8)
+      auroraPow = THREE.MathUtils.lerp(auroraPow,
+        THREE.MathUtils.clamp(0.18 + s.kp / 9 * 0.75 + southness * 0.4 + injectGlow, 0, 1.0), dt * 1.5)
+      auroraU.glow.value = auroraPow
+      auroraU.mixc.value = THREE.MathUtils.clamp((s.kp - 4) / 4 + southness * 0.3, 0, 1)
+      auroraU.oval.value = THREE.MathUtils.degToRad(11 + 2.3 * s.kp + 5 * southness)
+      return southness
+    }
+
+    // deterministic hooks for headless verification
+    window.jumpTo = iso => { simT = Date.parse(iso) / 1000; playing = false; playBtn.textContent = 'PLAY'; playBtn.classList.remove('on') }
+    window.__state = () => ({ simT, ...sample(simT), r0: shueState.r0 })
+
+    let frames = 0
+    renderer.setAnimationLoop(() => {
+      const dt = Math.min(clock.getDelta(), 1 / 30)
+      if (playing && !scrubbing) { simT += rate * 60 * dt; if (simT > t1) simT = t0 }
+      simT = THREE.MathUtils.clamp(simT, t0, t1)
+      const s = sample(simT)
+      shueState = shue(s.bz, s.n, s.v)
+      buildRhoTab(shueState)
+      const southness = step(dt, s)
+      if (Math.abs(shueState.r0 - lastLineR0) > 0.06 || Math.abs(southness - lastLineSouth) > 0.03) {
+        buildLines(shueState, southness)
+        lastLineR0 = shueState.r0; lastLineSouth = southness
+      }
+      auroraU.time.value += dt
+      finish.uniforms.uT.value = (performance.now() % 10000) / 10000 * 6.28
+      updateHud(simT, s)
+      drawTimeline((simT - t0) / (t1 - t0))
+      controls.update()
+      composer.render()
+      if (++frames === 30) window.__ready = true
+    })
+
+    addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix()
+      renderer.setSize(innerWidth, innerHeight); composer.setSize(innerWidth, innerHeight)
+      tlCache = null
+    })
+  </script>
+  <script>if(new URLSearchParams(location.search).has('bare')){const u=document.getElementById('ui');if(u)u.style.display='none';const c=document.getElementById('cv');/*keep seismic ring*/}</script>
+</body>
+</html>

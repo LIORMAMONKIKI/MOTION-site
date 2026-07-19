@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HEAT ISLAND — a year of Manhattan in thermal glass</title>
+  <style>
+    html,body{margin:0;height:100%;background:#030307;overflow:hidden}
+    canvas{display:block}
+    #ui{position:fixed;inset:0;pointer-events:none;font:12px ui-monospace,"SF Mono",Menlo,monospace;color:#9aa3b5}
+    #title{position:absolute;top:26px;left:28px;letter-spacing:.06em}
+    #title h1{margin:0;font-size:13px;font-weight:600;color:#e8ebf2;letter-spacing:.22em}
+    #title p{margin:6px 0 0;font-size:10.5px;color:#5c6577;letter-spacing:.14em;line-height:1.7}
+    #read{position:absolute;top:26px;right:28px;text-align:right;letter-spacing:.1em;line-height:1.9;font-size:11px}
+    #read b{color:#e8ebf2;font-weight:600}
+    #bigd{position:absolute;left:28px;bottom:52px;font-size:30px;font-weight:200;color:#ffb054;letter-spacing:.04em;z-index:2}
+    #bigd small{font-size:11px;color:#5c6577;letter-spacing:.2em;display:block;margin-top:2px}
+    #scale{position:absolute;left:0;right:0;bottom:0;height:104px;pointer-events:auto;cursor:ew-resize}
+    #ctl{position:absolute;left:28px;bottom:16px;pointer-events:auto;display:flex;gap:10px;z-index:2}
+    #ctl button{background:none;border:1px solid #2a3040;color:#9aa3b5;font:11px ui-monospace,Menlo,monospace;
+      letter-spacing:.15em;padding:5px 12px;cursor:pointer;border-radius:2px}
+    #ctl button:hover{border-color:#5c6577;color:#e8ebf2}
+    #ctl button.on{border-color:#ffb054;color:#ffd9a8}
+    #hint{position:absolute;bottom:128px;right:28px;font-size:10px;color:#3d4454;letter-spacing:.16em;text-align:right}
+    #load{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#5c6577;letter-spacing:.3em;font-size:11px}
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <div id="title">
+      <h1>HEAT ISLAND</h1>
+      <p>ONE YEAR OF MANHATTAN · EVERY BUILDING'S MEASURED SURFACE TEMPERATURE<br>
+      LANDSAT 8+9 TIRS · 30 M · 13 SATELLITE PASSES, 2025.07 — 2026.07<br>
+      <span id="sub"></span></p>
+    </div>
+    <div id="read"></div>
+    <div id="bigd">— <small>DATE · THE SCALE NEVER MOVES</small></div>
+    <div id="hint">DRAG TO ORBIT · DRAG THE TIMELINE THROUGH THE YEAR<br>DARK-BLUE COLD · BRIGHT-YELLOW HOT · THE SCALE NEVER MOVES</div>
+    <canvas id="scale"></canvas>
+    <div id="ctl">
+      <button id="play" class="on">PAUSE</button>
+      <button id="mode">PANORAMA</button>
+      <button id="tour">TOUR</button>
+    </div>
+    <div id="load">MEASURING A YEAR OF THE CITY…</div>
+  </div>
+
+  <script type="importmap">
+  { "imports": {
+    "three": "https://unpkg.com/three@0.171.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.171.0/examples/jsm/"
+  } }
+  </script>
+  <script type="module">
+    import * as THREE from 'three'
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+    import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
+    import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
+    import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
+    import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
+
+    // ---------------- TASTE ----------------
+    const T = {
+      // Eliasson foil ramp — spectrally impure, cool->hot
+      ramp: [
+        [0.00, '#0b1a4a'], [0.14, '#2b2a80'], [0.28, '#5c2a8a'], [0.42, '#8f2d78'],
+        [0.55, '#bd3355'], [0.68, '#e0552e'], [0.80, '#f5842a'], [0.90, '#fbb63f'], [1.00, '#fce98a'],
+      ],   // incandescent: luminance strictly rises cold->hot. blue->purple->red->orange->hot-yellow. no reversal.
+      domain:       [8, 50],   // ABSOLUTE °C anchors: ~20° sits blue-teal, ~40° sits red. Never moves.
+      panes:        22,
+      seam:         0.14,
+      impurity:     0.06,
+      wallShade:    0.55,
+      groundDim:    0.5,       // measured ground LST plane (rivers/park/surroundings) vs building brightness
+      fog:          '#04040a',
+      fogDensity:   0.00006,
+      sunSize:      3400,
+      bloom:        { strength: 0.75, radius: 0.55, threshold: 0.22 },
+      emissive:     1.5,
+      yearSecs:     32,        // full year loop duration
+    }
+    // ---------------------------------------
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true })
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
+    renderer.setSize(innerWidth, innerHeight)
+    document.body.appendChild(renderer.domElement)
+    const scene = new THREE.Scene()
+    scene.background = new THREE.Color(T.fog)
+    scene.fog = new THREE.FogExp2(T.fog, T.fogDensity)
+    const camera = new THREE.PerspectiveCamera(34, innerWidth / innerHeight, 10, 90000)
+    camera.position.set(5200, 3400, 7200)
+    const controls = new OrbitControls(camera, renderer.domElement)
+    controls.enableDamping = true; controls.dampingFactor = 0.06
+    controls.minDistance = 600; controls.maxDistance = 30000
+    controls.maxPolarAngle = Math.PI * 0.49
+    controls.autoRotate = false   // the city holds still; you move
+
+    const composer = new EffectComposer(renderer)
+    composer.addPass(new RenderPass(scene, camera))
+    composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight),
+      T.bloom.strength, T.bloom.radius, T.bloom.threshold))
+    composer.addPass(new OutputPass())
+
+    const ground = new THREE.Mesh(new THREE.CircleGeometry(250000, 64),
+      new THREE.MeshBasicMaterial({ color: '#020208' }))
+    ground.rotation.x = -Math.PI / 2; ground.position.y = -2
+    scene.add(ground)
+    let groundLST = null   // built after data load — the measured temperature of everything that is not a building
+
+    // the sun: disc sets behind the horizon; halo wraps over it
+    const sunTex = (() => {
+      const c = document.createElement('canvas'); c.width = c.height = 512
+      const g = c.getContext('2d'), gr = g.createRadialGradient(256, 256, 0, 256, 256, 256)
+      gr.addColorStop(0, 'rgba(255,190,110,1)'); gr.addColorStop(0.3, 'rgba(255,150,70,.5)')
+      gr.addColorStop(0.6, 'rgba(255,130,55,.12)'); gr.addColorStop(1, 'rgba(255,120,50,0)')
+      g.fillStyle = gr; g.fillRect(0, 0, 512, 512)
+      return new THREE.CanvasTexture(c)
+    })()
+    const sunDisc = new THREE.Sprite(new THREE.SpriteMaterial({ map: sunTex, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.9, fog: false }))
+    sunDisc.position.set(-9000, 900, -22000); sunDisc.scale.setScalar(T.sunSize * 1.6)
+    const sunHalo = new THREE.Sprite(new THREE.SpriteMaterial({ map: sunTex, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, opacity: 0.3, fog: false }))
+    sunHalo.position.copy(sunDisc.position); sunHalo.scale.setScalar(T.sunSize * 4)
+    scene.add(sunDisc, sunHalo)
+
+    // --- paned foil ramp texture ---
+    function buildRamp() {
+      const W = 1024, c = document.createElement('canvas'); c.width = W; c.height = 1
+      const g = c.getContext('2d')
+      const stops = T.ramp.map(([p, h]) => [p, new THREE.Color(h)])
+      const seed = i => (Math.sin(i * 127.1) * 43758.5453) % 1
+      for (let x = 0; x < W; x++) {
+        const u = x / (W - 1)
+        const pane = Math.min(Math.floor(u * T.panes), T.panes - 1)
+        const uc = (pane + 0.5) / T.panes
+        let a = stops[0], b = stops.at(-1)
+        for (let i = 0; i < stops.length - 1; i++)
+          if (uc >= stops[i][0] && uc <= stops[i + 1][0]) { a = stops[i]; b = stops[i + 1]; break }
+        const f = (uc - a[0]) / Math.max(b[0] - a[0], 1e-5)
+        const col = a[1].clone().lerp(b[1], f)
+        const n = seed(pane)
+        // hot panes stay honestly red — impurity drifts them toward orange only, never pink
+        const hotPane = pane > T.panes * 0.7
+        const hueOff = hotPane ? Math.abs(n - 0.5) * T.impurity * 0.6 : (n - 0.5) * T.impurity
+        col.offsetHSL(hueOff, (seed(pane + 7) - 0.5) * T.impurity * 2, 0)
+        const inPane = (u * T.panes) % 1
+        const seam = Math.min(inPane, 1 - inPane)
+        const dark = 1 - T.seam * Math.max(0, 1 - seam * 18)
+        g.fillStyle = `rgb(${col.r * 255 * dark | 0},${col.g * 255 * dark | 0},${col.b * 255 * dark | 0})`
+        g.fillRect(x, 0, 1, 1)
+      }
+      const t = new THREE.CanvasTexture(c); t.minFilter = t.magFilter = THREE.LinearFilter
+      return t
+    }
+    const rampTex = buildRamp()
+
+    // --- data ---
+    const data = await (await fetch('heat_year.json')).json()
+    const M = data.meta, SC = M.scenes, NS = SC.length
+    const sceneDay = SC.map(s => Date.parse(s.date.slice(0, 4) + '-' + s.date.slice(4, 6) + '-' + s.date.slice(6, 8)) / 86400e3)
+    const day0 = sceneDay[0], day1 = sceneDay[NS - 1]
+    document.getElementById('sub').textContent =
+      `${M.buildings.toLocaleString()} BUILDINGS · SURFACE ${M.t_min}–${M.t_max}°C · NYC OPEN DATA FOOTPRINTS`
+    const [D0, D1] = T.domain
+
+    // temperature texture: x = building%4096, y = scene*rows + building/4096
+    const NB = data.b.length
+    const ROWS = Math.ceil(NB / 4096)
+    const texH = ROWS * NS
+    const tArr = new Float32Array(4096 * texH)
+    data.b.forEach((b, i) => {
+      const x = i % 4096, r = Math.floor(i / 4096)
+      for (let s = 0; s < NS; s++) tArr[(s * ROWS + r) * 4096 + x] = b.t[s]
+    })
+    const tTex = new THREE.DataTexture(tArr, 4096, texH, THREE.RedFormat, THREE.FloatType)
+    tTex.minFilter = tTex.magFilter = THREE.NearestFilter; tTex.needsUpdate = true
+
+    // per-scene medians for HUD
+    const med = SC.map(s => s.p50)
+
+    // --- merged extruded geometry (attribute = building index) ---
+    let nV = 0, nI = 0
+    const polys = []
+    for (let bi = 0; bi < NB; bi++) for (const ring of data.b[bi].p) {
+      const n = ring.length / 2
+      polys.push([bi, ring, n])
+      nV += n * 3; nI += n * 6 + (n - 2) * 3
+    }
+    const pos = new Float32Array(nV * 3), aB = new Float32Array(nV), aS = new Float32Array(nV)
+    const idx = new Uint32Array(nI)
+    let v = 0, ii = 0
+    const v2 = []
+    for (const [bi, ring, n] of polys) {
+      const h = Math.max(data.b[bi].h, 3)
+      const base = v
+      for (let k = 0; k < n; k++) {
+        const x = ring[k * 2], z = -ring[k * 2 + 1]
+        pos[v * 3] = x; pos[v * 3 + 1] = 0; pos[v * 3 + 2] = z; aB[v] = bi; aS[v] = T.wallShade * 0.5; v++
+        pos[v * 3] = x; pos[v * 3 + 1] = h; pos[v * 3 + 2] = z; aB[v] = bi; aS[v] = T.wallShade; v++
+      }
+      for (let k = 0; k < n; k++) {
+        const a0 = base + k * 2, a1 = base + ((k + 1) % n) * 2
+        idx[ii++] = a0; idx[ii++] = a1; idx[ii++] = a0 + 1
+        idx[ii++] = a1; idx[ii++] = a1 + 1; idx[ii++] = a0 + 1
+      }
+      v2.length = 0
+      for (let k = 0; k < n; k++) v2.push(new THREE.Vector2(ring[k * 2], -ring[k * 2 + 1]))
+      const roofBase = v
+      for (let k = 0; k < n; k++) {
+        pos[v * 3] = v2[k].x; pos[v * 3 + 1] = h; pos[v * 3 + 2] = v2[k].y; aB[v] = bi; aS[v] = 1; v++
+      }
+      let tris
+      try { tris = THREE.ShapeUtils.triangulateShape(v2, []) } catch { tris = [] }
+      for (const tr of tris) { idx[ii++] = roofBase + tr[0]; idx[ii++] = roofBase + tr[1]; idx[ii++] = roofBase + tr[2] }
+    }
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+    geo.setAttribute('aB', new THREE.BufferAttribute(aB, 1))
+    geo.setAttribute('aS', new THREE.BufferAttribute(aS, 1))
+    geo.setIndex(new THREE.BufferAttribute(idx.subarray(0, ii), 1))
+    geo.computeVertexNormals()
+
+    const uni = {
+      uRamp: { value: rampTex }, uT: { value: tTex },
+      uRows: { value: ROWS }, uTexH: { value: texH },
+      uSceneA: { value: 0 }, uSceneB: { value: 0 }, uMix: { value: 0 },
+      uDom: { value: new THREE.Vector2(D0, D1) },
+      uEm: { value: T.emissive },
+      uFogColor: { value: new THREE.Color(T.fog) }, uFogDensity: { value: T.fogDensity },
+      uMode: { value: 0 }, uCam: { value: new THREE.Vector2() }, uViewAz: { value: 0 },
+      uCamPos: { value: new THREE.Vector3() }, uSunPos: { value: new THREE.Vector3() }, uGloss: { value: 1.0 },
+    }
+    const mat = new THREE.ShaderMaterial({
+      uniforms: uni,
+      vertexShader: `
+        attribute float aB; attribute float aS;
+        varying float vB; varying float vS; varying float vD; varying vec3 vW; varying vec3 vN;
+        void main(){
+          vB = aB; vS = aS;
+          vN = normalize(mat3(modelMatrix) * normal);
+          vec4 w = modelMatrix * vec4(position, 1.);
+          vW = w.xyz;
+          vec4 mv = viewMatrix * w;
+          vD = -mv.z;
+          gl_Position = projectionMatrix * mv;
+        }`,
+      fragmentShader: `
+        uniform sampler2D uRamp; uniform sampler2D uT;
+        uniform float uRows, uTexH, uSceneA, uSceneB, uMix, uEm, uFogDensity, uMode, uViewAz, uGloss;
+        uniform vec2 uDom; uniform vec3 uFogColor; uniform vec2 uCam; uniform vec3 uCamPos, uSunPos;
+        varying float vB; varying float vS; varying float vD; varying vec3 vW; varying vec3 vN;
+        float fetchT(float sc){
+          float x = (mod(vB, 4096.) + .5) / 4096.;
+          float y = (sc * uRows + floor(vB / 4096.) + .5) / uTexH;
+          return texture2D(uT, vec2(x, y)).r;
+        }
+        void main(){
+          float tC = mix(fetchT(uSceneA), fetchT(uSceneB), uMix);   // interpolated between passes
+          float u = clamp((tC - uDom.x) / (uDom.y - uDom.x), 0., 1.);
+          // absolute thermal glass: same hue = same degC, all year
+          vec3 thermal = texture2D(uRamp, vec2(u, .5)).rgb * uEm * (0.45 + 0.6 * u);
+          // rainbow panorama: hue = viewing bearing; temperature = luminance
+          float fragAz = atan(vW.x - uCam.x, vW.z - uCam.y);
+          float rel = mod(fragAz - uViewAz + 3.14159, 6.28318) - 3.14159;
+          float az = fract(rel * 2.5 / 6.28318 + 0.5);
+          vec3 pano = texture2D(uRamp, vec2(az, .5)).rgb * uEm * (0.10 + 1.5 * u * u);
+          vec3 col = mix(thermal, pano, uMode) * vS;
+          // glossy glass: fresnel sky + warm sun glint
+          vec3 N = normalize(gl_FrontFacing ? vN : -vN);
+          vec3 V = normalize(uCamPos - vW);
+          float F = pow(1. - clamp(dot(N, V), 0., 1.), 3.);
+          vec3 R = reflect(-V, N);
+          vec3 sky = mix(vec3(0.02,0.03,0.07), vec3(0.30,0.38,0.52), smoothstep(-0.1, 0.7, R.y));
+          vec3 L = normalize(uSunPos - vW);
+          float rl = clamp(dot(R, L), 0., 1.);
+          float spec = pow(rl, 90.) * 1.3 + pow(rl, 10.) * 0.12;
+          col += (F * sky * 0.8 + spec * vec3(1., .58, .28)) * vS * uGloss;
+          float f = 1. - exp(-uFogDensity * uFogDensity * vD * vD * 2.2);
+          col = mix(col, uFogColor, clamp(f, 0., 1.));
+          gl_FragColor = vec4(col, 1.);
+        }`,
+      side: THREE.DoubleSide,
+    })
+    const city = new THREE.Mesh(geo, mat)
+    city.rotation.y = THREE.MathUtils.degToRad(-29)
+    scene.add(city)
+
+    // --- measured ground LST planes: fine grid under the city, coarse grid for the surroundings ---
+    async function buildGround(binUrl, P, y) {
+      const gbuf = new Uint8Array(await (await fetch(binUrl)).arrayBuffer())
+      const gTex = new THREE.DataTexture(gbuf, P.w, P.h * NS, THREE.RedFormat, THREE.UnsignedByteType)
+      gTex.minFilter = gTex.magFilter = THREE.NearestFilter; gTex.needsUpdate = true
+      const gGeo = new THREE.PlaneGeometry(P.w * P.px, P.h * P.px)
+      gGeo.rotateX(-Math.PI / 2)
+      const gMat = new THREE.ShaderMaterial({
+        uniforms: {
+          uG: { value: gTex }, uRamp: { value: rampTex },
+          uSceneA: uni.uSceneA, uSceneB: uni.uSceneB, uMix: uni.uMix,
+          uDom: uni.uDom, uNS: { value: NS },
+          uT0: { value: P.t0 }, uT1: { value: P.t1 },
+          uDim: { value: T.groundDim },
+          uFogColor: uni.uFogColor, uFogDensity: uni.uFogDensity,
+        },
+        vertexShader: `
+          varying vec2 vUv; varying float vD;
+          void main(){ vUv = uv; vec4 mv = modelViewMatrix * vec4(position,1.); vD = -mv.z;
+            gl_Position = projectionMatrix * mv; }`,
+        fragmentShader: `
+          uniform sampler2D uG, uRamp;
+          uniform float uSceneA, uSceneB, uMix, uNS, uT0, uT1, uDim, uFogDensity;
+          uniform vec2 uDom; uniform vec3 uFogColor;
+          varying vec2 vUv; varying float vD;
+          float tempAt(float sc){
+            float v = (sc + (1.0 - vUv.y)) / uNS;
+            float b = texture2D(uG, vec2(vUv.x, v)).r * 255.0;
+            if (b < 0.5) return -999.0;
+            return (b - 1.0) / 254.0 * (uT1 - uT0) + uT0;
+          }
+          void main(){
+            float ta = tempAt(uSceneA), tb = tempAt(uSceneB);
+            float t = (ta < -900.0) ? tb : (tb < -900.0) ? ta : mix(ta, tb, uMix);
+            vec3 col;
+            if (t < -900.0) col = vec3(0.008, 0.009, 0.016);
+            else {
+              float u = clamp((t - uDom.x) / (uDom.y - uDom.x), 0., 1.);
+              col = texture2D(uRamp, vec2(u, .5)).rgb * uDim * (0.5 + 0.5 * u);
+            }
+            float f = 1. - exp(-uFogDensity * uFogDensity * vD * vD * 2.2);
+            gl_FragColor = vec4(mix(col, uFogColor, clamp(f, 0., 1.)), 1.);
+          }`,
+      })
+      const gm = new THREE.Mesh(gGeo, gMat)
+      const cx = P.x0 + P.w * P.px / 2, cz = -P.y0 + P.h * P.px / 2
+      gm.position.copy(new THREE.Vector3(cx, y, cz).applyEuler(city.rotation))
+      gm.rotation.y = city.rotation.y
+      scene.add(gm)
+      return gm
+    }
+    if (M.plane) groundLST = await buildGround('heat_ground.bin', M.plane, 0.25)
+    if (M.planeFine) await buildGround('heat_ground_fine.bin', M.planeFine, 0.45)
+    geo.computeBoundingBox()
+    const bbW = new THREE.Box3().setFromObject(city)
+    const C = bbW.getCenter(new THREE.Vector3()); C.y = 0
+    controls.target.set(C.x, 0, C.z)
+    camera.position.set(C.x + 3800, 3000, C.z + 7600)
+    document.getElementById('load').remove()
+
+    // --- tour along the real shoreline ---
+    const cosR = Math.cos(city.rotation.y), sinR = Math.sin(city.rotation.y)
+    const shore = new Map()
+    for (const b of data.b) {
+      const lx = b.p[0][0], lz = -b.p[0][1]
+      const wx = lx * cosR + lz * sinR, wz = -lx * sinR + lz * cosR
+      const bin = Math.round(wz / 500) * 500
+      if (!shore.has(bin) || wx < shore.get(bin)) shore.set(bin, wx)
+    }
+    const shoreAt = z => {
+      const bin = Math.round(z / 500) * 500
+      for (let d = 0; d <= 2000; d += 500) {
+        if (shore.has(bin + d)) return shore.get(bin + d)
+        if (shore.has(bin - d)) return shore.get(bin - d)
+      }
+      return bbW.min.x
+    }
+    const dollyPt = (z, off, y) => new THREE.Vector3(shoreAt(z) - off, y, z)
+    const tourPos = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(C.x + 4500, 3600, C.z + 9000),
+      dollyPt(C.z + 4200, 1400, 700),
+      dollyPt(C.z + 2400, 420, 160),
+      dollyPt(C.z, 420, 150),
+      dollyPt(C.z - 2600, 480, 170),
+      new THREE.Vector3(C.x - 1500, 1600, bbW.min.z - 2800),
+      new THREE.Vector3(C.x + 2600, 3300, bbW.min.z - 800),
+    ], true, 'catmullrom', 0.3)
+    const tourLook = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(C.x, 200, C.z),
+      dollyPt(C.z + 3400, -900, 220),
+      dollyPt(C.z + 1500, -1100, 120),
+      dollyPt(C.z - 900, -1100, 130),
+      dollyPt(C.z - 3600, -1000, 150),
+      new THREE.Vector3(C.x, 250, C.z),
+      new THREE.Vector3(C.x, 100, C.z),
+    ], true, 'catmullrom', 0.3)
+    let touring = false, tourT = 0
+    const TOUR_SECS = 75
+    const tv = new THREE.Vector3(), tl = new THREE.Vector3()
+    function tourFrame(dt) {
+      tourT = (tourT + dt / TOUR_SECS) % 1
+      tourPos.getPoint(tourT, tv); tourLook.getPoint(tourT, tl)
+      camera.position.lerp(tv, Math.min(dt * 3, 1))
+      controls.target.lerp(tl, Math.min(dt * 3, 1))
+    }
+    function setTour(on) { touring = on; controls.autoRotate = false; tourBtn.classList.toggle('on', on) }
+    renderer.domElement.addEventListener('pointerdown', () => touring && setTour(false))
+
+    // --- time: day-of-year position, interpolating between passes ---
+    let curDay = day1, playing = true    // start at the latest pass (the heat wave)
+    function sceneMixAt(day) {
+      const d = THREE.MathUtils.clamp(day, day0, day1)
+      let s = 0
+      while (s < NS - 2 && sceneDay[s + 1] < d) s++
+      const mix = THREE.MathUtils.clamp((d - sceneDay[s]) / Math.max(sceneDay[s + 1] - sceneDay[s], 1e-6), 0, 1)
+      return { s, mix }
+    }
+
+    // --- legend + timeline (one canvas: fixed spectrum above, year track below) ---
+    const sc = document.getElementById('scale'), sg = sc.getContext('2d')
+    let scCache = null
+    function buildScaleCache() {
+      const W = sc.width = innerWidth * devicePixelRatio, H = sc.height = 104 * devicePixelRatio
+      sc.style.width = innerWidth + 'px'
+      const m = 310 * devicePixelRatio, mr = 28 * devicePixelRatio   // left zone belongs to date + controls
+      const SPAN = W - m - mr
+      const c = document.createElement('canvas'); c.width = W; c.height = H
+      const g = c.getContext('2d')
+      g.fillStyle = 'rgba(3,3,7,.6)'; g.fillRect(0, 0, W, H)
+      // fixed spectrum legend
+      const ly = 12 * devicePixelRatio, lh = 16 * devicePixelRatio
+      g.imageSmoothingEnabled = false
+      g.drawImage(rampTex.image, 0, 0, 1024, 1, m, ly, SPAN, lh)
+      g.fillStyle = 'rgba(154,163,181,.9)'; g.font = `${9 * devicePixelRatio}px ui-monospace,Menlo,monospace`
+      for (let tC = Math.ceil(D0 / 5) * 5; tC <= D1; tC += 5) {
+        const x = m + ((tC - D0) / (D1 - D0)) * SPAN
+        g.fillRect(x, ly + lh, 1, 4 * devicePixelRatio)
+        g.fillText(tC + '°', x + 3, ly + lh + 13 * devicePixelRatio)
+      }
+      // year track
+      const ty = 62 * devicePixelRatio
+      g.fillStyle = '#1c2130'; g.fillRect(m, ty, SPAN, devicePixelRatio)
+      for (let s = 0; s < NS; s++) {
+        const x = m + ((sceneDay[s] - day0) / (day1 - day0)) * SPAN
+        // tick coloured by that scene's median on the SAME fixed scale
+        const u = THREE.MathUtils.clamp((med[s] - D0) / (D1 - D0), 0, 1)
+        const px = rampTex.image.getContext('2d').getImageData(Math.round(u * 1023), 0, 1, 1).data
+        g.fillStyle = `rgb(${px[0]},${px[1]},${px[2]})`
+        g.fillRect(x - devicePixelRatio, ty - 5 * devicePixelRatio, 2 * devicePixelRatio, 11 * devicePixelRatio)
+        g.fillStyle = 'rgba(92,101,119,.9)'
+        const d = SC[s].date
+        g.fillText(d.slice(4, 6) + '.' + d.slice(2, 4), x - 10 * devicePixelRatio, ty + 18 * devicePixelRatio)
+      }
+      scCache = { c, m, W, H, ty, SPAN }
+    }
+    function drawScale() {
+      if (!scCache) buildScaleCache()
+      const { c, m, W, H, ty, SPAN } = scCache
+      sg.clearRect(0, 0, W, H)
+      sg.drawImage(c, 0, 0)
+      const x = m + ((curDay - day0) / (day1 - day0)) * SPAN
+      sg.fillStyle = '#e8ebf2'
+      sg.fillRect(x - 1, ty - 12 * devicePixelRatio, 2, 24 * devicePixelRatio)
+    }
+    let scrubbing = false
+    const setFromEvent = e => {
+      curDay = day0 + THREE.MathUtils.clamp((e.clientX - 310) / (innerWidth - 310 - 28), 0, 1) * (day1 - day0)
+      playing = false; playBtn.textContent = 'PLAY'; playBtn.classList.remove('on')
+    }
+    sc.addEventListener('pointerdown', e => { scrubbing = true; setFromEvent(e) })
+    addEventListener('pointermove', e => scrubbing && setFromEvent(e))
+    addEventListener('pointerup', () => scrubbing = false)
+
+    // --- controls ---
+    const playBtn = document.getElementById('play')
+    playBtn.onclick = () => { playing = !playing; playBtn.textContent = playing ? 'PAUSE' : 'PLAY'; playBtn.classList.toggle('on', playing) }
+    const modeBtn = document.getElementById('mode')
+    modeBtn.onclick = () => {
+      const on = uni.uMode.value < 0.5
+      uni.uMode.value = on ? 1 : 0
+      modeBtn.classList.toggle('on', on)
+    }
+    const tourBtn = document.getElementById('tour')
+    tourBtn.onclick = () => setTour(!touring)
+
+    // --- readouts ---
+    const read = document.getElementById('read'), bigd = document.getElementById('bigd')
+    function hud(s, mix) {
+      const a = SC[s], b = SC[Math.min(s + 1, NS - 1)]
+      const near = mix < 0.5 ? a : b
+      const medNow = a.p50 + (b.p50 - a.p50) * mix
+      const hasOpen = a.p50_open != null && b.p50_open != null
+      const openNow = hasOpen ? a.p50_open + (b.p50_open - a.p50_open) * mix : null
+      const delta = hasOpen ? medNow - openNow : null
+      read.innerHTML =
+        `<div>NEAREST PASS <b>${near.id.slice(0, 4)} ${near.date}</b></div>` +
+        `<div>CITY MEDIAN SURFACE <b>${medNow.toFixed(1)}°C</b></div>` +
+        (hasOpen ? `<div>SURROUNDINGS (WATER · PARKS · OPEN) <b>${openNow.toFixed(1)}°C</b></div>` +
+          `<div>THE ISLAND <b>${delta >= 0 ? '+' : ''}${delta.toFixed(1)}°C</b> ABOVE ITS SURROUNDINGS</div>` : '') +
+        `<div>BUILDINGS <b>${M.buildings.toLocaleString()}</b></div>`
+      const dd = new Date(curDay * 86400e3)
+      bigd.firstChild.textContent = dd.toISOString().slice(0, 10).replaceAll('-', '.') + ' '
+    }
+
+    // hooks
+    window.setTime = f => { curDay = day0 + f * (day1 - day0); playing = false }
+    window.setMode = m => { uni.uMode.value = m; modeBtn.classList.toggle('on', m > 0.5) }
+    window.setCam = (x, y, z, tx = C.x, ty = 0, tz = C.z) => { camera.position.set(x, y, z); controls.target.set(tx, ty, tz); controls.autoRotate = false }
+    window.setTour = u => { touring = false; controls.autoRotate = false; tourPos.getPoint(u, camera.position); tourLook.getPoint(u, controls.target) }
+
+    const clock = new THREE.Clock()
+    let frames = 0
+    renderer.setAnimationLoop(() => {
+      const dt = Math.min(clock.getDelta(), 0.05)
+      if (playing && !scrubbing) {
+        curDay += (day1 - day0) * dt / T.yearSecs
+        if (curDay > day1) curDay = day0
+      }
+      const { s, mix } = sceneMixAt(curDay)
+      uni.uSceneA.value = s; uni.uSceneB.value = Math.min(s + 1, NS - 1); uni.uMix.value = mix
+      if (touring) tourFrame(dt)
+      uni.uCam.value.set(camera.position.x, camera.position.z)
+      uni.uViewAz.value = Math.atan2(controls.target.x - camera.position.x, controls.target.z - camera.position.z)
+      uni.uCamPos.value.copy(camera.position)
+      uni.uSunPos.value.copy(sunDisc.position)
+      const pano = uni.uMode.value
+      sunDisc.material.opacity = 0.9 - pano * 0.5
+      sunHalo.material.opacity = 0.3 - pano * 0.18
+      drawScale(); hud(s, mix)
+      controls.update()
+      composer.render()
+      if (++frames === 30) window.__ready = true
+    })
+    addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix()
+      renderer.setSize(innerWidth, innerHeight); composer.setSize(innerWidth, innerHeight)
+      scCache = null
+    })
+  </script>
+  <script>if(new URLSearchParams(location.search).has('bare')){const u=document.getElementById('ui');if(u)u.style.display='none';const c=document.getElementById('cv');/*keep seismic ring*/}</script>
+</body>
+</html>
